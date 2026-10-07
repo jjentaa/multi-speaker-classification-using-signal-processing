@@ -1,47 +1,47 @@
 # Real-time Multi-speaker Diarization
 
-ระบบแยกและระบุผู้พูด (1–4 คน ไม่พูดซ้อนกัน) แบบ real-time จากไมโครโฟนคอมพิวเตอร์ โดยใช้ signal processing ล้วนๆ
-(numpy / scipy) ไม่มี neural network เลย ทุกครั้งที่ผู้พูดเปลี่ยน ระบบจะตัดเสียงของคนก่อนหน้าออกมาเป็นไฟล์ `.wav`
-ที่ทำความสะอาดแล้ว (พร้อมส่งต่อให้ ASR) และบันทึก timestamp + label ลง JSON
+Real-time speaker separation and identification (1–4 speakers, no overlapping speech) from a computer microphone,
+using pure signal processing (numpy / scipy) with no neural network at all. Every time the speaker changes, the system
+cuts the previous speaker's audio out as a cleaned `.wav` file (ready to hand to an ASR) and logs the timestamp + label to JSON.
 
-## ติดตั้ง
+## Installation
 
 ```bash
 uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-(หรือ `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`)
+(or `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`)
 
-## วิธีใช้
+## Usage
 
-**Real-time จากไมโครโฟน**  (กด Ctrl+C เพื่อหยุด)
+**Real-time from the microphone**  (press Ctrl+C to stop)
 
 ```bash
 .venv/bin/python main.py live --out runs/live
 ```
 
-บน macOS ครั้งแรกต้องอนุญาตให้ Terminal ใช้ไมโครโฟน (System Settings → Privacy & Security → Microphone)
-ดูรายชื่ออุปกรณ์ได้ด้วย `main.py devices` แล้วเลือกด้วย `--device <index>`
+On macOS the first run requires granting Terminal microphone access (System Settings → Privacy & Security → Microphone).
+List the available devices with `main.py devices` and pick one with `--device <index>`.
 
-**จากไฟล์เสียง** (ป้อนเข้าไปทีละ 50 ms เหมือนไมค์จริง ใช้โค้ดชุดเดียวกัน) พร้อมประเมินผลและพล็อตกราฟ
+**From an audio file** (fed in 50 ms at a time like a real microphone, using the same code path), with evaluation and plots
 
 ```bash
 .venv/bin/python main.py file data/test4.wav --ref data/test4.rttm --out runs/test4 --plot --refine
 ```
 
-**ประเมินผลลัพธ์ที่มีอยู่แล้ว** (เช่นจากการอัดสด ที่ทำ reference เองทีหลัง)
+**Evaluate an existing result** (e.g. from a live recording whose reference was made afterwards)
 
 ```bash
 .venv/bin/python main.py eval --ref my_reference.rttm --hyp runs/live/result.json
 ```
 
-**สร้างบทสนทนาทดสอบที่รู้คำตอบ** (ใช้เสียง TTS ของ macOS เป็นผู้พูด, มี noise + reverb)
+**Generate a test conversation with known ground truth** (macOS TTS voices as speakers, with noise + reverb)
 
 ```bash
 .venv/bin/python tools/make_conversation.py --speakers 3 --turns 20 --out data/conv3
 ```
 
-**จูนพารามิเตอร์** (grid search หา DER ต่ำสุด) และ **unit test**
+**Tune parameters** (grid search for the lowest DER) and **unit tests**
 
 ```bash
 .venv/bin/python tools/tune.py data/conv2 data/conv3 data/conv4 --grid bic_lambda=1.5,1.7,1.9 clu_lambda=1.4,1.8,2.2
@@ -51,17 +51,17 @@ uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requi
 .venv/bin/python -m pytest tests
 ```
 
-พารามิเตอร์ทุกตัวอยู่ใน [diarize/config.py](diarize/config.py) และ override จาก command line ได้ เช่น
+All parameters live in [diarize/config.py](diarize/config.py) and can be overridden from the command line, e.g.
 `--set min_silence_s=0.4 bic_win_s=1.2`
 
 ### Output
 
 ```
 runs/<name>/
-  result.json          # timestamp + label ของทุก segment (ข้อ 2.2)
-  result.rttm          # รูปแบบมาตรฐานสำหรับ pyannote.metrics
-  segments/0003_SPK_2_00012.40-00015.93.wav   # 1 ไฟล์ = 1 ผู้พูด, 16 kHz, ทำความสะอาดแล้ว
-  eval.json, session.png, session_timeline.png   # เมื่อใส่ --ref / --plot
+  result.json          # timestamp + label of every segment (item 2.2)
+  result.rttm          # standard format for pyannote.metrics
+  segments/0003_SPK_2_00012.40-00015.93.wav   # 1 file = 1 speaker, 16 kHz, cleaned
+  eval.json, session.png, session_timeline.png   # when --ref / --plot is given
 ```
 
 ```json
@@ -70,10 +70,10 @@ runs/<name>/
  "file": "segments/0000_SPK_1_00000.82-00003.63.wav"}
 ```
 
-`reason` บอกว่าตัดเพราะอะไร: `pause` (เงียบ ≥ 0.3 s), `change` (ΔBIC ตรวจเจอการเปลี่ยนผู้พูดกลางเสียงพูด),
-`max` (ยาวเกิน 20 s), `flush` (หยุดอัด)
+`reason` says why the segment was cut: `pause` (silence ≥ 0.3 s), `change` (ΔBIC detected a speaker change mid-speech),
+`max` (longer than 20 s), `flush` (recording stopped)
 
-## Pipeline (ตรงกับหัวข้อ 2.1 ใน proposal)
+## Pipeline (matches section 2.1 of the proposal)
 
 ```
 mic 48 kHz ─► FIR low-pass 7.2 kHz ─► ↓3 ─► 16 kHz ─┬─► pre-emphasis ─► Butterworth BP 80–7000 ─► Hamming ─► DFT ─► |X|² ─► mel ─► MFCC ─┐
@@ -88,45 +88,45 @@ mic 48 kHz ─► FIR low-pass 7.2 kHz ─► ↓3 ─► 16 kHz ─┬─► pr
                                                              segments/*.wav + result.json
 ```
 
-| หัวข้อ | ทำอะไร | โค้ด |
+| Section | What it does | Code |
 |---|---|---|
-| 2.1.1 Sampling | รับเสียงจากไมค์ 48 kHz ทีละบล็อก 50 ms ผ่าน `sounddevice` callback | [main.py](main.py) `cmd_live` |
-| 2.1.2 Low-pass | FIR 97 taps (Hamming window design) ตัดที่ 7.2 kHz กัน aliasing ก่อนลด rate | [dsp.py](diarize/dsp.py) `Decimator` |
-| 2.1.3 Down sampling | เก็บทุกตัวอย่างที่ 3 → 16 kHz (จำ phase ข้ามบล็อก จึงได้ผลเท่ากับทำทั้งไฟล์) | `Decimator.process` |
-| 2.1.4 Pre-emphasis | `y[n] = x[n] − 0.97 x[n−1]` ยกความถี่สูงให้ formant ชัด | `PreEmphasis` |
-| 2.1.5 IIR Butterworth | อันดับ 4 แบบ SOS มี state ต่อเนื่อง ใช้ 3 ตัว: band speech, band pitch, high-pass สำหรับไฟล์เสียง | `Butterworth` |
+| 2.1.1 Sampling | Captures 48 kHz microphone audio in 50 ms blocks through a `sounddevice` callback | [main.py](main.py) `cmd_live` |
+| 2.1.2 Low-pass | 97-tap FIR (Hamming window design) with a 7.2 kHz cutoff to prevent aliasing before the rate reduction | [dsp.py](diarize/dsp.py) `Decimator` |
+| 2.1.3 Down sampling | Keeps every 3rd sample → 16 kHz (the phase is carried across blocks, so the result equals processing the whole file) | `Decimator.process` |
+| 2.1.4 Pre-emphasis | `y[n] = x[n] − 0.97 x[n−1]` boosts high frequencies so the formants stand out | `PreEmphasis` |
+| 2.1.5 IIR Butterworth | 4th order in SOS form with continuous state; three are used: speech band, pitch band, and a high-pass for audio files | `Butterworth` |
 | 2.1.6 Windowing | Hamming 32 ms, hop 10 ms | `hamming`, `frame_signal` |
-| 2.1.7 DFT | ใช้ FFT 512 จุด (มี `dft()` แบบนิยามตรง O(N²) ไว้ตรวจว่าตรงกัน) | `dft`, `power_spectrum` |
-| 2.1.8 Power spectrum + Spectrogram | `|X[k]|²/N` → mel filterbank 26 ช่อง → log → DCT → MFCC c1–c12 | `power_spectrum`, `spectrogram`, `mfcc_from_power` |
-| 2.1.9 Autocorrelation | Wiener–Khinchin `r = IDFT{|X|²}` (zero-pad ≥ 2N−1 ให้เป็น linear correlation) + center clipping → F0 | `autocorrelation`, `pitch_autocorr` |
-| 2.1.10 Clustering | Gaussian ของ MFCC + log-F0 ต่อผู้พูด ตัดสินด้วย ΔBIC (online) และ agglomerative BIC (offline เปรียบเทียบ) | [cluster.py](diarize/cluster.py), [gauss.py](diarize/gauss.py) |
+| 2.1.7 DFT | 512-point FFT (a direct-definition O(N²) `dft()` is kept to verify they match) | `dft`, `power_spectrum` |
+| 2.1.8 Power spectrum + Spectrogram | `|X[k]|²/N` → 26-channel mel filterbank → log → DCT → MFCC c1–c12 | `power_spectrum`, `spectrogram`, `mfcc_from_power` |
+| 2.1.9 Autocorrelation | Wiener–Khinchin `r = IDFT{|X|²}` (zero-padded to ≥ 2N−1 so it is a linear correlation) + center clipping → F0 | `autocorrelation`, `pitch_autocorr` |
+| 2.1.10 Clustering | Per-speaker Gaussian of MFCC + log-F0, decided by ΔBIC (online) and agglomerative BIC (offline, for comparison) | [cluster.py](diarize/cluster.py), [gauss.py](diarize/gauss.py) |
 
-### การสร้าง window ตัดเสียงแบบ real-time ([pipeline.py](diarize/pipeline.py))
+### Building the real-time cutting window ([pipeline.py](diarize/pipeline.py))
 
-state machine ทำงานทุก 10 ms:
+A state machine runs every 10 ms:
 
-1. **VAD** – พลังงานเฟรมเทียบกับ noise floor ที่ปรับตัวเอง (ลงเร็ว ขึ้นช้า) ถ้าเกิน 10 dB = เสียงพูด
-2. **ตัดที่ช่วงเงียบ** – เงียบ ≥ 0.3 s → ปิด segment ส่งออกทันที (delay ≈ 0.35 s)
-3. **ตัดกลางเสียงพูด** – ผู้พูดบางคนต่อกันโดยไม่เว้นช่วง จึงเทียบหน้าต่าง 1 s สองอันติดกันด้วย
-   ΔBIC = ½[N log|Σ| − N₁ log|Σ₁| − N₂ log|Σ₂|] − λP ถ้า ΔBIC > 0 แล้วผ่านจุดสูงสุดไป 0.25 s
-   → ตัดที่จุดสูงสุด (delay ≈ 1.3 s)
-4. segment ที่ปิดแล้วเข้า **clustering** → ได้ label → **cleaner** (spectral subtraction จาก noise print
-   ช่วงเงียบล่าสุด, ตัดหัวท้าย, normalize −20 dBFS, fade) → เขียนไฟล์ + JSON ทันที
+1. **VAD** – frame energy against a self-adapting noise floor (falls fast, rises slowly); more than 10 dB above it = speech
+2. **Cut at a pause** – silence ≥ 0.3 s → close the segment and emit it immediately (delay ≈ 0.35 s)
+3. **Cut mid-speech** – some speakers follow each other with no gap, so two adjacent 1 s windows are compared with
+   ΔBIC = ½[N log|Σ| − N₁ log|Σ₁| − N₂ log|Σ₂|] − λP; if ΔBIC > 0 and the peak is 0.25 s behind
+   → cut at the peak (delay ≈ 1.3 s)
+4. A closed segment goes to **clustering** → gets a label → **cleaner** (spectral subtraction using a noise print
+   from the most recent silence, trim head and tail, normalize to −20 dBFS, fade) → file + JSON written immediately
 
 ### Clustering
 
-แต่ละผู้พูดเป็น full-covariance Gaussian ของ MFCC + Gaussian 1 มิติของ log-F0 (สะสม sufficient statistics
-จึงอัปเดต/รวมได้เร็ว) segment ใหม่เข้าผู้พูดที่ ΔBIC ต่ำสุดถ้า ΔBIC < 0 ไม่อย่างนั้นเปิดผู้พูดใหม่ (สูงสุด 4)
-โดยกำหนดว่าต้องมีเสียงพูด ≥ 1.5 s ถึงจะเปิดผู้พูดใหม่ได้ (covariance จาก segment สั้นๆ ไม่น่าเชื่อถือ
-ทำให้เกิดผู้พูดปลอม) และถ้าโมเดลผู้พูด 2 คนกลายเป็นคล้ายกัน (ΔBIC < 0) จะรวมเป็นคนเดียว
+Each speaker is a full-covariance Gaussian of MFCC + a 1-D Gaussian of log-F0 (sufficient statistics are accumulated,
+so updating/merging is fast). A new segment joins the speaker with the lowest ΔBIC if ΔBIC < 0; otherwise a new speaker
+is opened (at most 4), provided there is ≥ 1.5 s of speech (a covariance from a short segment is unreliable and
+creates spurious speakers). If two speaker models become similar (ΔBIC < 0) they are merged into one.
 
-## ผลการทดลอง (ข้อ 4)
+## Experimental results (item 4)
 
-บทสนทนาสังเคราะห์จากเสียง TTS ของ macOS (~100 s, 20–24 turns, 30% ของการสลับผู้พูดเว้นช่วง < 0.15 s,
-มี noise + room reverb) — ชุด `conv*` ใช้จูนพารามิเตอร์, ชุด `test*` ใช้เสียงอีกชุดและไม่ได้ใช้จูน
-(DER ใช้ collar 0.25 s, F1 = macro F1 ต่อผู้พูดหลัง optimal mapping, frame 10 ms)
+Conversations synthesized from macOS TTS voices (~100 s, 20–24 turns, 30% of speaker changes have a gap < 0.15 s,
+with noise + room reverb) — the `conv*` set was used for parameter tuning; the `test*` set uses different voices and was not used for tuning
+(DER uses a 0.25 s collar, F1 = per-speaker macro F1 after optimal mapping, 10 ms frames)
 
-| ไฟล์ | ผู้พูด | SNR / RT60 | DER | Speaker F1 | ผู้พูดที่เจอ | delay เฉลี่ย / สูงสุด |
+| File | Speakers | SNR / RT60 | DER | Speaker F1 | Speakers found | Mean / max delay |
 |---|---|---|---|---|---|---|
 | conv2 | 2 | 30 dB / 0.2 s | 1.8 % | 97.9 % | 2 | 0.93 / 1.32 s |
 | conv3 | 3 | 30 dB / 0.2 s | 3.8 % | 94.7 % | 3 | 1.07 / 1.32 s |
@@ -135,17 +135,17 @@ state machine ทำงานทุก 10 ms:
 | **test3** | 3 | 25 dB / 0.2 s | **5.9 %** | **93.7 %** | 3 | 0.85 / 1.31 s |
 | **test4** | 4 | 20 dB / 0.3 s | **3.9 %** | **96.4 %** | 4 | 0.67 / 1.32 s |
 
-- **Time delay** ไม่เกิน 1.32 s ทุกไฟล์ (เป้าหมาย 1–2 s) — ตัดที่ช่วงเงียบ ~0.35 s, ตัดด้วย ΔBIC ~1.3 s
-- ประมวลผลเร็วกว่า real-time ~65 เท่า (real-time factor 0.015 บน MacBook)
-- ระบบ online ได้ผลใกล้เคียง/ดีกว่า offline re-clustering (`--refine`) เล็กน้อย
+- **Time delay** is at most 1.32 s on every file (target 1–2 s) — pause cuts ~0.35 s, ΔBIC cuts ~1.3 s
+- Processing runs ~65× faster than real time (real-time factor 0.015 on a MacBook)
+- The online system performs on par with / slightly better than offline re-clustering (`--refine`)
 
 ![session](docs/session_test4.png)
 
-## ข้อจำกัด / สิ่งที่ควรทำต่อ
+## Limitations / future work
 
-- ตัวเลขข้างบนมาจากเสียง TTS ซึ่งแต่ละ "คน" เสียงคงที่มาก กับคนจริงในห้องควรอัดเสียงจริง (`main.py live`
-  จะเก็บ `recording.wav` ไว้) ทำ reference RTTM แล้วใช้ `tools/tune.py` จูน `bic_lambda`, `clu_lambda`,
-  `min_silence_s` ใหม่ — ค่า λ ของ BIC มีผลมากที่สุด
-- ช่วงแรกของการประชุม ผู้พูดที่พูดสั้นกว่า 1.5 s จะยังไม่ถูกแยกเป็นคนใหม่ (ถูกนับรวมกับคนที่ใกล้ที่สุด)
-- label ที่ส่งออกไปแล้วแก้ไม่ได้ (เป็น real-time) ถ้าโมเดลสองคนถูกรวมกันทีหลัง label ใหม่จะถูกต้อง แต่ของเก่าไม่เปลี่ยน
-- ตามขอบเขต 1.3.2 ระบบไม่รองรับการพูดซ้อนกัน
+- The numbers above come from TTS voices, where each "person" has a very stable voice. For real people in a room, record
+  real audio (`main.py live` keeps a `recording.wav`), make a reference RTTM, then use `tools/tune.py` to re-tune
+  `bic_lambda`, `clu_lambda`, `min_silence_s` — the BIC λ has the largest effect
+- Early in a meeting, a speaker who talks for less than 1.5 s is not yet split off as a new speaker (they are assigned to the nearest one)
+- Labels that have already been emitted cannot be changed (it is real-time); if two models are merged later, new labels are correct but old ones stay as they were
+- Per scope 1.3.2, the system does not support overlapping speech
