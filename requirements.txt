@@ -1,0 +1,7 @@
+numpy>=1.26
+scipy>=1.11
+sounddevice>=0.4.6
+soundfile>=0.12
+matplotlib>=3.8
+pyannote.metrics>=3.2
+pytest>=8
