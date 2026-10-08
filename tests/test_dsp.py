@@ -104,3 +104,23 @@ def test_pipeline_chunk_size_invariant():
         d.flush()
         res.append([(round(s.start, 3), round(s.end, 3), s.speaker) for s in d.segments])
     assert res[0] and res[0] == res[1] == res[2]
+
+
+def test_adaptive_canceller_removes_hum_keeps_noise():
+    fs = 16000
+    t = np.arange(6 * fs) / fs
+    hum = 0.2 * (np.sin(2 * np.pi * 50 * t) + 0.5 * np.sin(2 * np.pi * 150 * t + 1.0))
+    noise = 0.01 * rng.standard_normal(len(t))
+    e = dsp.AdaptiveNoiseCanceller(taps=512, delay=480, mu=0.02, fs=fs).process(hum + noise)
+    tail = slice(4 * fs, None)
+    assert np.mean((e - noise)[tail] ** 2) < 0.01 * np.mean(hum[tail] ** 2)   # hum down > 20 dB
+    assert np.mean(e[tail] ** 2) > 0.5 * np.mean(noise[tail] ** 2)            # unpredictable part kept
+
+
+def test_adaptive_canceller_chunk_size_invariant():
+    x = np.sin(2 * np.pi * 50 * np.arange(8000) / 16000) + 0.1 * rng.standard_normal(8000)
+    a = dsp.AdaptiveNoiseCanceller(taps=64, delay=160)
+    b = dsp.AdaptiveNoiseCanceller(taps=64, delay=160)
+    whole = a.process(x)
+    parts = np.concatenate([b.process(x[i:i + 777]) for i in range(0, len(x), 777)])
+    assert np.allclose(whole, parts)

@@ -10,6 +10,12 @@ class Config:
     aa_numtaps: int = 97           # FIR anti-aliasing low-pass length
     aa_cutoff_ratio: float = 0.9   # cutoff = ratio * target_sr/2  (7.2 kHz)
 
+    # --- Adaptive filtering (NLMS noise canceller, runs on the 16 kHz signal) ---
+    anc_taps: int = 1024           # adaptive FIR length (64 ms); 0 = stage off
+    anc_delay_s: float = 0.03      # reference = microphone delayed by this much
+    anc_mu: float = 0.005          # NLMS step size
+    anc_gate_db: float = 6.0       # adapt only while output < noise floor + gate
+
     # --- 2.1.4 Pre-emphasis -----------------------------------------------------
     preemph: float = 0.97          # y[n] = x[n] - a*x[n-1]
 

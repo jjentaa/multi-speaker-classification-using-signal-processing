@@ -1,6 +1,6 @@
 """Streaming front-end: raw microphone samples -> per-frame features.
 
-    mic (48 kHz) -> FIR low-pass -> downsample x3 -> 16 kHz  x16
+    mic (48 kHz) -> FIR low-pass -> downsample x3 -> 16 kHz -> NLMS noise canceller  x16
         x16 -> pre-emphasis -> Butterworth band-pass 80-7000 -> Hamming -> DFT -> |X|^2 -> mel -> MFCC
         x16 -> Butterworth band-pass 60-900 -> Hamming -> autocorrelation -> F0
         x16 -> Butterworth high-pass 70 -> frame energy (VAD) + audio kept for output files
@@ -72,6 +72,8 @@ class FrontEnd:
         sr_in = input_sr or cfg.input_sr
         fs = cfg.target_sr
         self.decim = dsp.Decimator(sr_in, fs, cfg.aa_numtaps, cfg.aa_cutoff_ratio)
+        self.anc = dsp.AdaptiveNoiseCanceller(cfg.anc_taps, int(cfg.anc_delay_s * fs), cfg.anc_mu, fs,
+                                              cfg.anc_gate_db) if cfg.anc_taps else None
         self.pre = dsp.PreEmphasis(cfg.preemph)
         self.bp_speech = dsp.Butterworth(cfg.bp_order, cfg.speech_band, fs, "bandpass")
         self.bp_pitch = dsp.Butterworth(cfg.bp_order, cfg.pitch_band, fs, "bandpass")
@@ -87,6 +89,8 @@ class FrontEnd:
     def process(self, chunk: np.ndarray) -> Frames:
         cfg = self.cfg
         x16 = self.decim.process(np.asarray(chunk, dtype=np.float64))
+        if self.anc:
+            x16 = self.anc.process(x16)
         x_spk = self.bp_speech.process(self.pre.process(x16))
         x_pitch = self.bp_pitch.process(x16)
         x_audio = self.hp_audio.process(x16)

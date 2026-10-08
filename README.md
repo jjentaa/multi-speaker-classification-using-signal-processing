@@ -41,10 +41,14 @@ List the available devices with `main.py devices` and pick one with `--device <i
 .venv/bin/python tools/make_conversation.py --speakers 3 --turns 20 --out data/conv3
 ```
 
-**Tune parameters** (grid search for the lowest DER) and **unit tests**
+**Tune parameters** (grid search for the lowest DER), **hum robustness test** and **unit tests**
 
 ```bash
 .venv/bin/python tools/tune.py data/conv2 data/conv3 data/conv4 --grid bic_lambda=1.5,1.7,1.9 clu_lambda=1.4,1.8,2.2
+```
+
+```bash
+.venv/bin/python tools/hum_test.py data/test2 data/test3 data/test4 --snr 20 10 0
 ```
 
 ```bash
@@ -76,16 +80,16 @@ runs/<name>/
 ## Pipeline (matches section 2.1 of the proposal)
 
 ```
-mic 48 kHz ─► FIR low-pass 7.2 kHz ─► ↓3 ─► 16 kHz ─┬─► pre-emphasis ─► Butterworth BP 80–7000 ─► Hamming ─► DFT ─► |X|² ─► mel ─► MFCC ─┐
- (2.1.1)        (2.1.2)              (2.1.3)        │     (2.1.4)          (2.1.5)                (2.1.6)  (2.1.7) (2.1.8)             │
-                                                    ├─► Butterworth BP 60–900 ─► Hamming ─► autocorrelation ─► F0 ────────────────────────┤
-                                                    │                                          (2.1.9)                                  │
-                                                    └─► Butterworth HP 70 ─► energy VAD ─► real-time window ◄── ΔBIC change detection ◄─┤
-                                                                                                │                                       │
-                                                             clean (spectral subtraction) ◄─ cut segment ─► online BIC clustering ◄─────┘
-                                                                     │                                          (2.1.10)
-                                                                     ▼
-                                                             segments/*.wav + result.json
+mic 48 kHz ─► FIR low-pass 7.2 kHz ─► ↓3 ─► 16 kHz ─► NLMS canceller ─┬─► pre-emphasis ─► Butterworth BP 80–7000 ─► Hamming ─► DFT ─► |X|² ─► mel ─► MFCC ─┐
+ (2.1.1)        (2.1.2)              (2.1.3)          (adaptive)      │     (2.1.4)          (2.1.5)                (2.1.6)  (2.1.7) (2.1.8)             │
+                                                                      ├─► Butterworth BP 60–900 ─► Hamming ─► autocorrelation ─► F0 ────────────────────────┤
+                                                                      │                                          (2.1.9)                                  │
+                                                                      └─► Butterworth HP 70 ─► energy VAD ─► real-time window ◄── ΔBIC change detection ◄─┤
+                                                                                                                  │                                       │
+                                                                               clean (spectral subtraction) ◄─ cut segment ─► online BIC clustering ◄─────┘
+                                                                                       │                                          (2.1.10)
+                                                                                       ▼
+                                                                               segments/*.wav + result.json
 ```
 
 | Section | What it does | Code |
@@ -93,6 +97,7 @@ mic 48 kHz ─► FIR low-pass 7.2 kHz ─► ↓3 ─► 16 kHz ─┬─► pr
 | 2.1.1 Sampling | Captures 48 kHz microphone audio in 50 ms blocks through a `sounddevice` callback | [main.py](main.py) `cmd_live` |
 | 2.1.2 Low-pass | 97-tap FIR (Hamming window design) with a 7.2 kHz cutoff to prevent aliasing before the rate reduction | [dsp.py](diarize/dsp.py) `Decimator` |
 | 2.1.3 Down sampling | Keeps every 3rd sample → 16 kHz (the phase is carried across blocks, so the result equals processing the whole file) | `Decimator.process` |
+| Adaptive filtering | NLMS adaptive noise canceller (1024 taps, reference = the microphone delayed 30 ms); removes mains hum / fan tones before feature extraction | `AdaptiveNoiseCanceller` |
 | 2.1.4 Pre-emphasis | `y[n] = x[n] − 0.97 x[n−1]` boosts high frequencies so the formants stand out | `PreEmphasis` |
 | 2.1.5 IIR Butterworth | 4th order in SOS form with continuous state; three are used: speech band, pitch band, and a high-pass for audio files | `Butterworth` |
 | 2.1.6 Windowing | Hamming 32 ms, hop 10 ms | `hamming`, `frame_signal` |
@@ -113,6 +118,24 @@ A state machine runs every 10 ms:
 4. A closed segment goes to **clustering** → gets a label → **cleaner** (spectral subtraction using a noise print
    from the most recent silence, trim head and tail, normalize to −20 dBFS, fade) → file + JSON written immediately
 
+### Adaptive noise canceller ([dsp.py](diarize/dsp.py) `AdaptiveNoiseCanceller`)
+
+Same structure as an acoustic echo canceller, but a single microphone has no separate reference signal, so the
+reference is the microphone itself delayed by D = 30 ms (an adaptive line enhancer):
+
+```
+d(n) = v(n) + y(n)        microphone = speech + periodic interference (hum, fan)
+x(n) = d(n − D)           reference
+ŷ(n) = ĥᵀ x(n)            adaptive FIR estimate of the interference
+e(n) = d(n) − ŷ(n)        output, goes on to the three feature branches
+ĥ ← ĥ + μ e(n) x(n) / (‖x(n)‖² + L e(n)²)        NLMS, μ = 0.005, L = 1024
+```
+
+A periodic interference can be predicted from 30 ms ago, so it is subtracted. Voiced speech and reverberation are
+also partly predictable over 30 ms, so the weights are only updated while the output level is within 6 dB of its
+noise floor (i.e. nobody is talking), the same reason an echo canceller freezes during double-talk. Set
+`--set anc_taps=0` to switch the stage off.
+
 ### Clustering
 
 Each speaker is a full-covariance Gaussian of MFCC + a 1-D Gaussian of log-F0 (sufficient statistics are accumulated,
@@ -128,18 +151,42 @@ with noise + room reverb) — the `conv*` set was used for parameter tuning; the
 
 | File | Speakers | SNR / RT60 | DER | Speaker F1 | Speakers found | Mean / max delay |
 |---|---|---|---|---|---|---|
-| conv2 | 2 | 30 dB / 0.2 s | 1.8 % | 97.9 % | 2 | 0.93 / 1.32 s |
-| conv3 | 3 | 30 dB / 0.2 s | 3.8 % | 94.7 % | 3 | 1.07 / 1.32 s |
+| conv2 | 2 | 30 dB / 0.2 s | 1.8 % | 97.9 % | 2 | 0.94 / 1.32 s |
+| conv3 | 3 | 30 dB / 0.2 s | 3.8 % | 94.5 % | 3 | 1.08 / 1.32 s |
 | conv4 | 4 | 30 dB / 0.2 s | 3.6 % | 95.5 % | 4 | 1.03 / 1.32 s |
 | **test2** | 2 | 30 dB / 0.2 s | **5.8 %** | **93.5 %** | 2 | 0.97 / 1.32 s |
-| **test3** | 3 | 25 dB / 0.2 s | **5.9 %** | **93.7 %** | 3 | 0.85 / 1.31 s |
-| **test4** | 4 | 20 dB / 0.3 s | **3.9 %** | **96.4 %** | 4 | 0.67 / 1.32 s |
+| **test3** | 3 | 25 dB / 0.2 s | **5.8 %** | **93.7 %** | 3 | 0.82 / 1.32 s |
+| **test4** | 4 | 20 dB / 0.3 s | **4.6 %** | **95.9 %** | 4 | 0.69 / 1.32 s |
 
 - **Time delay** is at most 1.32 s on every file (target 1–2 s) — pause cuts ~0.35 s, ΔBIC cuts ~1.3 s
-- Processing runs ~65× faster than real time (real-time factor 0.015 on a MacBook)
-- The online system performs on par with / slightly better than offline re-clustering (`--refine`)
+- Processing runs ~16× faster than real time (real-time factor 0.06 on a MacBook; 0.015 with the adaptive canceller off)
+- Against offline re-clustering (`--refine`) the online system is better on conv2, conv3 and test2 (offline finds
+  too many speakers there), worse on conv4 and test3, and equal on test4
+
+**Mains hum** (50 Hz + harmonics to 600 Hz added to the same six files, `tools/hum_test.py`), mean DER:
+
+| Speech-to-hum ratio | Canceller off | Canceller on |
+|---|---|---|
+| no hum | 4.1 % | 4.2 % |
+| 20 dB | 11.9 % | 4.1 % |
+| 10 dB | 34.2 % | 7.7 % |
+| 0 dB | 98.8 % | 16.8 % |
+
+Without hum the canceller changes nothing on five files and costs 0.7 points on test4.
 
 ![session](docs/session_test4.png)
+
+**Real meetings** (AMI corpus, headset mix, 4 speakers, 14–25 min, 5–16 % of speech overlapped; default parameters):
+
+| Meeting | DER | miss / false alarm / confusion | Speaker F1 | DER if everything is labelled as one speaker |
+|---|---|---|---|---|
+| ES2004a | 74.3 % | 27.1 / 7.7 / 39.4 | 22.4 % | 56.2 % |
+| IS1009a | 48.1 % | 19.2 / 7.1 / 21.8 | 42.0 % | 38.6 % |
+| TS3003a | 61.1 % | 42.0 / 0.9 / 18.1 | 18.9 % | 14.1 % |
+
+On real meetings the system is no better than labelling all speech as one speaker (the last column assumes perfect
+speech detection). Turns are short (median ≈ 1 s, below the 1.5 s needed to open a new speaker), quiet speakers are
+missed by the energy VAD, and a small grid over `bic_lambda` / `clu_lambda` did not help.
 
 ## Limitations / future work
 
@@ -148,4 +195,7 @@ with noise + room reverb) — the `conv*` set was used for parameter tuning; the
   `bic_lambda`, `clu_lambda`, `min_silence_s` — the BIC λ has the largest effect
 - Early in a meeting, a speaker who talks for less than 1.5 s is not yet split off as a new speaker (they are assigned to the nearest one)
 - Labels that have already been emitted cannot be changed (it is real-time); if two models are merged later, new labels are correct but old ones stay as they were
+- The adaptive canceller only removes steady periodic interference (hum, fan tones) and has only been tested on
+  synthetic hum; it does nothing for broadband noise, and after a sudden change in the interference it needs a
+  pause in the speech to re-converge
 - Per scope 1.3.2, the system does not support overlapping speech

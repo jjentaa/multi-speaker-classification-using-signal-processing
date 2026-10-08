@@ -70,6 +70,64 @@ class Butterworth:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive filtering (NLMS)   e[n] = d[n] - h^T x[n]
+# ---------------------------------------------------------------------------
+class AdaptiveNoiseCanceller:
+    """Single-microphone adaptive noise canceller (adaptive line enhancer).
+
+    Same structure as an echo canceller, but with only one microphone there is
+    no separate reference, so the reference is the microphone itself delayed
+    by D samples:
+
+        d[n] = v[n] + y[n]      microphone = speech + periodic interference
+        x[n] = d[n - D]         reference
+        y^[n] = h^T x[n]        adaptive FIR estimate of the interference
+        e[n] = d[n] - y^[n]     output
+
+    Hum / fan tones are periodic for ever, so they can be predicted from D
+    samples ago and are subtracted. The weights follow NLMS,
+    h += mu * e[n] * x[n] / (eps + ||x[n]||^2 + L e[n]^2), but only while the output level
+    is near its noise floor: voiced speech and reverberation are predictable
+    over D too, so adapting during speech would make the filter cancel the
+    talker (the same reason an echo canceller freezes during double-talk).
+    """
+
+    def __init__(self, taps: int = 512, delay: int = 480, mu: float = 0.02, fs: int = 16000,
+                 gate_db: float = 6.0, eps: float = 1e-6):
+        self.L, self.mu, self.eps = taps, mu, eps
+        self.h = np.zeros(taps)                     # h[k] multiplies d[n - D - (L-1) + k]
+        self.hist = np.zeros(taps - 1 + delay)      # microphone samples before the next chunk
+        self.a = np.exp(-1.0 / (0.010 * fs))        # 10 ms power smoothing
+        self.gate = 10 ** (gate_db / 10)
+        self.rise = 10 ** (3.0 / 10 / fs)           # noise floor may rise 3 dB / s
+        self.p = 0.0                                # smoothed output power
+        self.floor = 0.0                            # output noise floor (power)
+        self.warmup = int(0.05 * fs)                # samples left before p is a valid power estimate
+        self.adapting = 0                           # samples adapted on (for diagnostics)
+
+    def process(self, d: np.ndarray) -> np.ndarray:
+        L, mu, eps, h, a = self.L, self.mu, self.eps, self.h, self.a
+        buf = np.concatenate([self.hist, d])
+        e = np.empty(len(d))
+        p, floor, warmup = self.p, self.floor, self.warmup
+        for n in range(len(d)):
+            x = buf[n:n + L]
+            e[n] = d[n] - h @ x
+            p = a * p + (1 - a) * e[n] * e[n]
+            if warmup:
+                warmup -= 1
+                floor = p
+                continue
+            floor = p if p < floor else floor * self.rise
+            if p < floor * self.gate:
+                h += (mu * e[n] / (eps + x @ x + L * e[n] * e[n])) * x
+                self.adapting += 1
+        self.p, self.floor, self.warmup = p, floor, warmup
+        self.hist = buf[len(d):]
+        return e
+
+
+# ---------------------------------------------------------------------------
 # 2.1.6 Windowing
 # ---------------------------------------------------------------------------
 def hamming(N: int) -> np.ndarray:
