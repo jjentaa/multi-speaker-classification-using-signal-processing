@@ -20,7 +20,6 @@ import time
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
-import soundfile as sf
 
 from .cleaner import clean_segment
 from .cluster import OnlineSpeakerClustering, agglomerative_bic
@@ -250,6 +249,7 @@ class StreamingDiarizer:
         if self.out_dir:
             name = f"{seg.id:04d}_{seg.label}_{start:08.2f}-{end:08.2f}.wav"
             seg.file = os.path.join("segments", name)
+            import soundfile as sf  # only needed when writing files (not available in the browser build)
             sf.write(os.path.join(self.out_dir, seg.file), audio, fs, subtype="PCM_16")
         self.segments.append(seg)
         return [seg]

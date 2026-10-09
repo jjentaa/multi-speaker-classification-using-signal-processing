@@ -58,6 +58,15 @@ List the available devices with `main.py devices` and pick one with `--device <i
 All parameters live in [diarize/config.py](diarize/config.py) and can be overridden from the command line, e.g.
 `--set min_silence_s=0.4 bic_win_s=1.2`
 
+**Web demo** (the same Python package running in the browser through Pyodide; microphone, sample conversations or an uploaded file)
+
+```bash
+python3 -m http.server 8765
+```
+
+then open `http://localhost:8765/web/`. The site is static, so it can be deployed as is (e.g. `vercel` from the
+repository root; `vercel.json` maps `/` to `web/index.html`).
+
 ### Output
 
 ```

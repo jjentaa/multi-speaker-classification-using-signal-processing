@@ -1,0 +1,4 @@
+{
+  "rewrites": [{ "source": "/", "destination": "/web/index.html" }],
+  "headers": [{ "source": "/diarize/(.*)", "headers": [{ "key": "Content-Type", "value": "text/plain; charset=utf-8" }] }]
+}

@@ -1,0 +1,12 @@
+.venv
+.pytest_cache
+.claude
+runs
+data
+docs
+tests
+tools
+main.py
+requirements.txt
+README.md
+__pycache__
