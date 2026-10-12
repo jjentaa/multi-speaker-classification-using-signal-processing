@@ -1,8 +1,7 @@
-"""Signal-processing building blocks (proposal section 2.1).
+"""Signal-processing blocks.
 
-Every filter here is *stateful* so that audio can be pushed in arbitrary
-chunks (real-time) and the output is identical to filtering the whole signal
-at once.
+Every filter keeps its state, so audio can be pushed in small chunks and the
+result is the same as filtering the whole signal at once.
 """
 from __future__ import annotations
 
@@ -15,19 +14,21 @@ from scipy.fft import dct
 # 2.1.2 Low-pass (FIR anti-aliasing) + 2.1.3 Down-sampling
 # ---------------------------------------------------------------------------
 class Decimator:
-    """Anti-aliasing FIR low-pass followed by keeping every M-th sample.
+    """Low-pass FIR, then keep every M-th sample. The filter prevents aliasing."""
 
-    Down-sampling by M folds everything above fs_new/2 back into the band, so
-    the signal must first be low-passed below fs_new/2 (cutoff = ratio*fs_new/2).
-    """
-
-    def __init__(self, fs_in: int, fs_out: int, numtaps: int = 97, cutoff_ratio: float = 0.9):
+    def __init__(self, fs_in: int, fs_out: int, numtaps: int = 97, cutoff_ratio: float = 0.9,
+                 h: np.ndarray | None = None):
         if fs_in % fs_out:
             raise ValueError(f"fs_in ({fs_in}) must be an integer multiple of fs_out ({fs_out})")
         self.M = fs_in // fs_out
-        self.h = signal.firwin(numtaps, cutoff_ratio * (fs_out / 2), fs=fs_in, window="hamming") if self.M > 1 else np.array([1.0])
+        if self.M == 1:
+            self.h = np.array([1.0])
+        elif h is not None:
+            self.h = h
+        else:
+            self.h = signal.firwin(numtaps, cutoff_ratio * (fs_out / 2), fs=fs_in, window="hamming")
         self.zi = np.zeros(len(self.h) - 1)
-        self.phase = 0  # index (inside the next chunk) of the next sample to keep
+        self.phase = 0  # position of the next sample to keep, inside the next chunk
 
     def process(self, x: np.ndarray) -> np.ndarray:
         if self.M == 1:
@@ -36,6 +37,27 @@ class Decimator:
         out = y[self.phase::self.M]
         self.phase = (self.phase - len(x)) % self.M
         return out
+
+
+def kaiser_lowpass(passband_hz: float, stopband_hz: float, ripple: float, fs: float) -> np.ndarray:
+    """Design a low-pass FIR with the Kaiser window method.
+
+    A = -20 log10(ripple)             attenuation needed (dB)
+    beta = 0.1102 (A - 8.7)           window shape (for A > 50)
+    M = (A - 8) / (2.285 dw)          filter order, dw = stopband edge - passband edge
+    h[n] = ideal low-pass (sinc) x Kaiser window
+    
+    """
+    wp, ws = 2 * np.pi * passband_hz / fs, 2 * np.pi * stopband_hz / fs
+    A = -20 * np.log10(ripple)
+    beta = 0.1102 * (A - 8.7) if A > 50 else 0.5842 * (A - 21) ** 0.4 + 0.07886 * (A - 21) if A >= 21 else 0.0
+    M = int(np.ceil((A - 8) / (2.285 * (ws - wp))))
+    M += M % 2                                   # even order, so the filter is symmetric (linear phase)
+    m = np.arange(M + 1) - M / 2
+    wc = (wp + ws) / 2
+    hd = (wc / np.pi) * np.sinc(wc * m / np.pi)
+    w = np.i0(beta * np.sqrt(1 - (m / (M / 2)) ** 2)) / np.i0(beta)
+    return hd * w
 
 
 # ---------------------------------------------------------------------------
@@ -70,40 +92,48 @@ class Butterworth:
 
 
 # ---------------------------------------------------------------------------
+# Median filter (non-linear): removes isolated outliers without smearing edges
+# ---------------------------------------------------------------------------
+class MedianFilter:
+    """Causal running median over the last N values (N odd), stateful."""
+
+    def __init__(self, N: int):
+        self.N = N
+        self.hist = np.zeros(N - 1)
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        if len(x) == 0:
+            return np.asarray(x, dtype=float)
+        buf = np.concatenate([self.hist, np.asarray(x, dtype=float)])
+        self.hist = buf[len(buf) - (self.N - 1):]
+        return np.median(np.lib.stride_tricks.sliding_window_view(buf, self.N), axis=1)
+
+
+# ---------------------------------------------------------------------------
 # Adaptive filtering (NLMS)   e[n] = d[n] - h^T x[n]
 # ---------------------------------------------------------------------------
 class AdaptiveNoiseCanceller:
-    """Single-microphone adaptive noise canceller (adaptive line enhancer).
+    """NLMS filter that removes hum using a single microphone.
 
-    Same structure as an echo canceller, but with only one microphone there is
-    no separate reference, so the reference is the microphone itself delayed
-    by D samples:
-
-        d[n] = v[n] + y[n]      microphone = speech + periodic interference
-        x[n] = d[n - D]         reference
-        y^[n] = h^T x[n]        adaptive FIR estimate of the interference
-        e[n] = d[n] - y^[n]     output
-
-    Hum / fan tones are periodic for ever, so they can be predicted from D
-    samples ago and are subtracted. The weights follow NLMS,
-    h += mu * e[n] * x[n] / (eps + ||x[n]||^2 + L e[n]^2), but only while the output level
-    is near its noise floor: voiced speech and reverberation are predictable
-    over D too, so adapting during speech would make the filter cancel the
-    talker (the same reason an echo canceller freezes during double-talk).
+    The reference is the microphone itself, delayed by D samples. A hum repeats, so
+    it can be predicted from the past and subtracted:  e[n] = d[n] - h^T x[n].
+    The weights are only updated while nobody is talking; otherwise the filter
+    would learn to cancel the speech too.
+    
     """
 
     def __init__(self, taps: int = 512, delay: int = 480, mu: float = 0.02, fs: int = 16000,
                  gate_db: float = 6.0, eps: float = 1e-6):
         self.L, self.mu, self.eps = taps, mu, eps
-        self.h = np.zeros(taps)                     # h[k] multiplies d[n - D - (L-1) + k]
-        self.hist = np.zeros(taps - 1 + delay)      # microphone samples before the next chunk
-        self.a = np.exp(-1.0 / (0.010 * fs))        # 10 ms power smoothing
+        self.h = np.zeros(taps)                     # filter weights
+        self.hist = np.zeros(taps - 1 + delay)      # past microphone samples
+        self.a = np.exp(-1.0 / (0.010 * fs))        # smoothing of the output power (10 ms)
         self.gate = 10 ** (gate_db / 10)
-        self.rise = 10 ** (3.0 / 10 / fs)           # noise floor may rise 3 dB / s
+        self.rise = 10 ** (3.0 / 10 / fs)           # the noise floor may rise 3 dB per second
         self.p = 0.0                                # smoothed output power
-        self.floor = 0.0                            # output noise floor (power)
-        self.warmup = int(0.05 * fs)                # samples left before p is a valid power estimate
-        self.adapting = 0                           # samples adapted on (for diagnostics)
+        self.floor = 0.0                            # noise floor of the output
+        self.warmup = int(0.05 * fs)                # skip the first 50 ms
+        self.adapting = 0                           # how many samples the weights were updated on
 
     def process(self, d: np.ndarray) -> np.ndarray:
         L, mu, eps, h, a = self.L, self.mu, self.eps, self.h, self.a
@@ -148,11 +178,7 @@ def frame_signal(x: np.ndarray, win_len: int, hop: int) -> np.ndarray:
 # 2.1.7 DFT
 # ---------------------------------------------------------------------------
 def dft(x: np.ndarray) -> np.ndarray:
-    """Direct O(N^2) DFT  X[k] = sum_n x[n] e^{-j 2 pi k n / N}.
-
-    Kept as the reference definition; the pipeline uses the FFT (same result,
-    O(N log N)) -- see tests/test_dsp.py.
-    """
+    """DFT straight from the definition, O(N^2). Only used to check that the FFT gives the same result."""
     N = len(x)
     n = np.arange(N)
     W = np.exp(-2j * np.pi * np.outer(n, n) / N)
@@ -209,16 +235,18 @@ def mfcc_from_power(P: np.ndarray, fb: np.ndarray, n_mfcc: int) -> np.ndarray:
 # 2.1.9 Autocorrelation  (Wiener-Khinchin: r = IDFT{|X|^2})
 # ---------------------------------------------------------------------------
 def autocorrelation(frames: np.ndarray) -> np.ndarray:
-    """Linear (not circular) autocorrelation of each frame via the FFT.
-
-    Zero-padding to >= 2N-1 makes the circular correlation computed by the
-    DFT equal to the linear one.
-    """
+    """Autocorrelation of each frame, computed with the FFT (zero-padded so it does not wrap around)."""
     N = frames.shape[-1]
     nfft = 1 << int(np.ceil(np.log2(2 * N - 1)))
     X = np.fft.rfft(frames, n=nfft, axis=-1)
     r = np.fft.irfft(np.abs(X) ** 2, n=nfft, axis=-1)
     return r[..., :N]
+
+
+def autocorr_lags(frames: np.ndarray, p: int) -> np.ndarray:
+    """r[k] = sum_n x[n] x[n+k] for k = 0..p, straight from the definition."""
+    N = frames.shape[-1]
+    return np.stack([np.sum(frames[..., :N - k] * frames[..., k:], axis=-1) for k in range(p + 1)], axis=-1)
 
 
 def center_clip(frames: np.ndarray, ratio: float) -> np.ndarray:
@@ -229,28 +257,25 @@ def center_clip(frames: np.ndarray, ratio: float) -> np.ndarray:
 
 def pitch_autocorr(frames: np.ndarray, fs: int, f0_min=60.0, f0_max=400.0,
                    clip_ratio=0.3, voicing_thr=0.35):
-    """F0 per frame from the peak of the normalised autocorrelation.
-
-    Returns (f0_hz, voicing_strength); f0 = 0 for unvoiced frames.
-    """
+    """F0 of each frame from the autocorrelation peak. Returns (f0_hz, voicing); f0 = 0 if unvoiced."""
     frames = np.atleast_2d(frames)
     N = frames.shape[-1]
     w = hamming(N)
     r = autocorrelation(center_clip(frames * w, clip_ratio))
-    # divide by the autocorrelation of the window itself -> unbiased peak heights
+    # divide by the window's own autocorrelation, so peak heights are comparable
     rw = autocorrelation(w[None, :])[0]
     r = r / np.maximum(rw, 1e-3 * rw[0])
     r0 = r[:, :1]
     rn = np.where(r0 > 1e-12, r / np.maximum(r0, 1e-12), 0.0)
     lo, hi = int(fs / f0_max), min(int(fs / f0_min), N - 2)
-    # only true local maxima inside [lo, hi] are pitch candidates (no edge peaks)
+    # a pitch candidate must be a real peak inside the allowed lag range
     mid = rn[:, lo:hi + 1]
     is_peak = (mid > rn[:, lo - 1:hi]) & (mid >= rn[:, lo + 1:hi + 2])
     seg = np.where(is_peak, mid, -np.inf)
     k = np.argmax(seg, axis=1)
     strength = np.maximum(seg[np.arange(len(seg)), k], 0.0)
     lag = (k + lo).astype(float)
-    # parabolic interpolation around the peak for sub-sample lag
+    # fit a parabola around the peak for a finer lag estimate
     i = k + lo
     ok = (i > 0) & (i < N - 1)
     a, b, c = rn[np.arange(len(rn)), i - 1], rn[np.arange(len(rn)), i], rn[np.arange(len(rn)), np.minimum(i + 1, N - 1)]

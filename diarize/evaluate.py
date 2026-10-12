@@ -1,11 +1,8 @@
-"""Evaluation criteria (proposal section 4).
+"""Scores.
 
-4.1 Diarization Error Rate  (pyannote.metrics)
-        DER = (false alarm + missed speech + speaker confusion) / total reference speech
-4.2 F1 of speaker identification, per speaker then macro-averaged, computed on
-        10 ms frames after the optimal (Hungarian) mapping of hypothesis labels
-        to reference speakers
-4.3 Time delay: how long after a segment ends it is released by the system
+DER   = (missed speech + false alarm + wrong speaker) / total speech time
+F1    = per speaker, on 10 ms frames, after matching system labels to true speakers
+delay = how long after a segment ends the system outputs it
 """
 from __future__ import annotations
 
@@ -29,7 +26,7 @@ def to_annotation(turns: Turns, uri: str = "session") -> Annotation:
 
 def der(ref: Turns, hyp: Turns, collar: float = 0.25) -> dict:
     metric = DiarizationErrorRate(collar=collar, skip_overlap=False)
-    with warnings.catch_warnings():  # "uem approximated by the union of ref and hyp" is what we want
+    with warnings.catch_warnings():  # hide a harmless pyannote warning
         warnings.simplefilter("ignore")
         r = metric(to_annotation(ref), to_annotation(hyp), detailed=True)
     total = r["total"] or 1.0
@@ -58,7 +55,7 @@ def speaker_f1(ref: Turns, hyp: Turns, step: float = 0.01) -> dict:
     n = int(np.ceil(T / step)) + 1
     r = _frame_labels(ref, ref_labels, n, step)
     h = _frame_labels(hyp, hyp_labels, n, step)
-    # co-occurrence matrix and optimal one-to-one mapping
+    # match each system label to the true speaker it overlaps most
     C = np.zeros((len(ref_labels), len(hyp_labels)))
     both = (r >= 0) & (h >= 0)
     np.add.at(C, (r[both], h[both]), 1)
@@ -69,7 +66,7 @@ def speaker_f1(ref: Turns, hyp: Turns, step: float = 0.01) -> dict:
         if hl in mapping:
             h_mapped[h == j] = ref_labels.index(mapping[hl])
         else:
-            h_mapped[h == j] = -2  # extra hypothesis speaker: always wrong
+            h_mapped[h == j] = -2  # extra speaker: counted as wrong
     per = {}
     for k, rl in enumerate(ref_labels):
         tp = np.sum((r == k) & (h_mapped == k))
@@ -77,7 +74,7 @@ def speaker_f1(ref: Turns, hyp: Turns, step: float = 0.01) -> dict:
         rec = tp / max(np.sum(r == k), 1)
         per[rl] = {"precision": prec, "recall": rec, "f1": 2 * prec * rec / max(prec + rec, 1e-12)}
     macro = float(np.mean([v["f1"] for v in per.values()])) if per else 0.0
-    # accuracy on frames where both reference and system say "speech"
+    # accuracy on frames where both say there is speech
     acc = float(np.mean(h_mapped[both] == r[both])) if both.any() else 0.0
     return {"macro_f1": macro, "per_speaker": per, "mapping": mapping, "speech_frame_accuracy": acc,
             "n_ref_speakers": len(ref_labels), "n_hyp_speakers": len(hyp_labels)}

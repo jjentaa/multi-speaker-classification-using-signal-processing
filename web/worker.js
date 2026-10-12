@@ -2,7 +2,7 @@
 const PYODIDE = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/";
 importScripts(PYODIDE + "pyodide.js");
 
-const MODULES = ["__init__", "config", "dsp", "frontend", "gauss", "cluster", "vad", "cleaner", "pipeline"];
+const MODULES = ["__init__", "config", "dsp", "frontend", "gauss", "ar", "sparse", "cluster", "vad", "cleaner", "pipeline"];
 
 const BRIDGE = `
 import sys, json, time
@@ -56,7 +56,7 @@ async function init() {
   postMessage({ type: "status", text: "Loading diarizer…" });
   py.FS.mkdirTree("/app/diarize");
   await Promise.all(MODULES.map(async (m) => {
-    const r = await fetch(`/diarize/${m}.py`);
+    const r = await fetch(`/diarize/${m}.py`, { cache: "no-cache" });   // always the current Python code
     if (!r.ok) throw new Error(`could not load diarize/${m}.py (${r.status})`);
     py.FS.writeFile(`/app/diarize/${m}.py`, await r.text());
   }));
@@ -90,16 +90,6 @@ onmessage = async (ev) => {
       reply("result", call("push", m.chunk));
     } else if (m.type === "flush") {
       reply("result", call("flush"), { final: true });
-    } else if (m.type === "batch") {
-      // whole file as fast as possible (no playback): also reports the real-time factor
-      call("start", m.sampleRate, m.anc);
-      const n = Math.round(m.sampleRate * 0.05);
-      const t0 = performance.now();
-      for (let i = 0; i < m.samples.length; i += n) {
-        reply("result", call("push", m.samples.subarray(i, i + n)));
-      }
-      const wall = (performance.now() - t0) / 1000;
-      reply("result", call("flush"), { final: true, rtf: wall / (m.samples.length / m.sampleRate) });
     }
   } catch (e) {
     postMessage({ type: "error", text: String(e) });

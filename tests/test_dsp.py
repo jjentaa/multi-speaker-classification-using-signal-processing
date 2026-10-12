@@ -124,3 +124,59 @@ def test_adaptive_canceller_chunk_size_invariant():
     whole = a.process(x)
     parts = np.concatenate([b.process(x[i:i + 777]) for i in range(0, len(x), 777)])
     assert np.allclose(whole, parts)
+
+
+def test_kaiser_lowpass_meets_its_specification():
+    fs, fp, fstop, delta = 48000, 6800.0, 8000.0, 0.001
+    h = dsp.kaiser_lowpass(fp, fstop, delta, fs)
+    assert len(h) % 2 == 1 and np.allclose(h, h[::-1])              # type I linear phase
+    f, H = signal.freqz(h, worN=8192, fs=fs)
+    assert np.max(np.abs(np.abs(H[f <= fp]) - 1)) < 1.5 * delta     # passband ripple
+    assert np.max(np.abs(H[f >= fstop])) < 1.5 * delta              # stopband attenuation (60 dB)
+
+
+def test_median_filter_removes_spikes_and_is_chunk_invariant():
+    x = np.full(50, 120.0)
+    x[[10, 30]] = 240.0                                             # isolated octave errors
+    y = dsp.MedianFilter(5).process(x)
+    assert np.all(y[4:] == 120.0)
+    m = dsp.MedianFilter(5)
+    assert np.allclose(np.concatenate([m.process(x[i:i + 7]) for i in range(0, 50, 7)]), y)
+
+
+def test_normal_equations_recover_ar_coefficients():
+    from diarize.ar import itakura, prediction_error_filter
+    a = np.array([1.2, -0.6, 0.1])                                  # x[n] = 1.2x[n-1] - 0.6x[n-2] + 0.1x[n-3] + w[n]
+    x = signal.lfilter([1.0], np.concatenate([[1.0], -a]), rng.standard_normal(200000))
+    r = dsp.autocorr_lags(x[None, :], 3)[0]
+    A = prediction_error_filter(r / r[0], reg=0.0)
+    assert np.allclose(-A[1:], a, atol=0.02)
+    assert abs(itakura(r / r[0], r / r[0])) < 1e-9                  # same spectrum -> distance 0
+    y = signal.lfilter([1.0], [1.0, -0.5], rng.standard_normal(200000))
+    ry = dsp.autocorr_lags(y[None, :], 3)[0]
+    assert itakura(r / r[0], ry / ry[0]) > 0.1                      # different spectrum -> clearly positive
+
+
+def test_omp_recovers_a_sparse_code():
+    from diarize.sparse import omp
+    D = rng.standard_normal((12, 20))
+    D /= np.linalg.norm(D, axis=1, keepdims=True)
+    A = np.zeros((30, 12))
+    for row in A:
+        row[rng.choice(12, 2, replace=False)] = rng.uniform(1, 2, 2) * rng.choice([-1, 1], 2)
+    X = A @ D
+    A_hat, R = omp(D, X, 2)
+    assert np.allclose(A_hat, A, atol=1e-6) and np.max(np.abs(R)) < 1e-6
+
+
+def test_ksvd_dictionary_fits_its_own_data_better_than_other_data():
+    from diarize.sparse import ksvd, residual_ratio
+    def cloud(seed):                                   # frames scattered along 4 directions of a 16-d space
+        r = np.random.default_rng(seed)
+        base = r.standard_normal((4, 16))
+        return base[r.integers(0, 4, 400)] * r.uniform(0.5, 2, (400, 1)) + 0.05 * r.standard_normal((400, 16))
+    a, b = cloud(1), cloud(2)
+    D = ksvd(a[:300], 4, 1)
+    assert np.allclose(np.linalg.norm(D, axis=1), 1.0)
+    assert residual_ratio(D, a[300:], 1) < 0.05        # unseen frames of the same source
+    assert residual_ratio(D, b, 1) > 5 * residual_ratio(D, a[300:], 1)

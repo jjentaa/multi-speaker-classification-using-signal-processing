@@ -1,19 +1,15 @@
-"""2.1.10 Clustering: decide *who* spoke each segment.
+"""Decide who spoke each segment.
 
-Online (real-time): every closed segment is compared with each known speaker
-model using dBIC; it joins the closest one if dBIC < 0, otherwise it becomes a
-new speaker (up to `max_speakers`). Two speaker models that become similar
-(dBIC < 0) are merged, so an early wrong split does not stay forever.
-
-Offline (optional refinement at the end of a recording): classic bottom-up
-agglomerative BIC clustering over all segments.
+A new segment joins the closest known speaker if it is close enough, otherwise it
+becomes a new speaker (up to `max_speakers`). Speakers that become alike are merged.
+`agglomerative_bic` re-clusters everything at the end; it is only used for comparison.
 """
 from __future__ import annotations
 
 import numpy as np
 
 from .config import Config
-from .gauss import SpeakerStats, speaker_distance
+from .gauss import SpeakerStats
 
 
 class OnlineSpeakerClustering:
@@ -23,11 +19,10 @@ class OnlineSpeakerClustering:
         self._next_id = 0
 
     def assign(self, seg: SpeakerStats, speech_s: float) -> tuple[int, float, dict[int, float]]:
-        """Returns (speaker id, confidence 0..1, dBIC to every speaker)."""
+        """Returns (speaker id, confidence 0..1, distance to every speaker)."""
         cfg = self.cfg
-        dists = {k: speaker_distance(seg, s, cfg.clu_lambda, cfg.pitch_weight) for k, s in self.speakers.items()}
-        # full-covariance statistics of a very short segment are unreliable, so
-        # only a long enough segment may open a new speaker
+        dists = {k: seg.distance(s, cfg) for k, s in self.speakers.items()}
+        # a very short segment is not reliable, so only a long enough one may open a new speaker
         can_create = len(self.speakers) < cfg.max_speakers and speech_s >= cfg.clu_min_new_s
         if not self.speakers:
             if speech_s < cfg.clu_min_new_s * 0.5:
@@ -44,8 +39,7 @@ class OnlineSpeakerClustering:
         return best, _confidence(margin, seg.n), dists
 
     def _new(self, seg: SpeakerStats) -> int:
-        s = SpeakerStats(seg.mfcc.d)
-        s.merge_(seg)
+        s = seg.copy()
         k = self._next_id
         self._next_id += 1
         self.speakers[k] = s
@@ -58,7 +52,7 @@ class OnlineSpeakerClustering:
         for j in list(self.speakers):
             if j == k or j not in self.speakers or k not in self.speakers:
                 continue
-            if speaker_distance(self.speakers[k], self.speakers[j], cfg.clu_lambda, cfg.pitch_weight) < 0:
+            if self.speakers[k].distance(self.speakers[j], cfg, "merge") < 0:
                 keep, drop = min(j, k), max(j, k)
                 self.speakers[keep].merge_(self.speakers.pop(drop))
                 self.speakers[keep].decay_to(cfg.clu_max_frames)
@@ -80,7 +74,7 @@ def agglomerative_bic(stats: list[SpeakerStats], cfg: Config) -> np.ndarray:
     keys = list(clusters)
     for a in range(len(keys)):
         for b in range(a + 1, len(keys)):
-            D[(keys[a], keys[b])] = speaker_distance(clusters[keys[a]], clusters[keys[b]], cfg.clu_lambda, cfg.pitch_weight)
+            D[(keys[a], keys[b])] = clusters[keys[a]].distance(clusters[keys[b]], cfg)
     while len(clusters) > 1:
         (i, j), d = min(D.items(), key=lambda kv: kv[1])
         if d >= 0 and len(clusters) <= cfg.max_speakers:
@@ -90,7 +84,7 @@ def agglomerative_bic(stats: list[SpeakerStats], cfg: Config) -> np.ndarray:
         D = {k: v for k, v in D.items() if i not in k and j not in k}
         for k in clusters:
             if k != i:
-                D[(min(i, k), max(i, k))] = speaker_distance(clusters[i], clusters[k], cfg.clu_lambda, cfg.pitch_weight)
+                D[(min(i, k), max(i, k))] = clusters[i].distance(clusters[k], cfg)
     labels = np.zeros(len(stats), dtype=int)
     # number clusters in order of first appearance
     order = sorted(members, key=lambda k: min(members[k]))

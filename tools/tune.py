@@ -1,6 +1,6 @@
 """Grid search over Config parameters on a set of labelled files (mean DER).
 
-    python tools/tune.py data/conv2 data/conv3 data/conv4 --grid bic_lambda=1.3,1.6,2.0 clu_lambda=0.5,1,1.5
+    python tools/tune.py data/conv2 data/conv3 data/conv4 --grid ar_change_thr=0.9,1.1,1.3 ar_clu_thr=0.18,0.22,0.26
 """
 from __future__ import annotations
 

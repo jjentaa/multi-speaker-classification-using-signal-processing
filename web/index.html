@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Real-time Speaker Diarization</title>
-  <link rel="stylesheet" href="/web/style.css">
+  <link rel="stylesheet" href="/web/style.css?v=6">
 </head>
 <body>
   <main>
     <header>
       <div>
         <h1>Real-time speaker diarization</h1>
-        <p class="sub">Who spoke when, from one microphone, with signal processing only. Runs entirely in this browser tab.</p>
+        <p class="sub">Who spoke when, from one microphone, with signal processing only.</p>
       </div>
       <span id="status" class="pill">Loading…</span>
     </header>
@@ -26,7 +26,6 @@
           <option value="test4" selected>Sample: 4 speakers</option>
         </select>
         <button id="btn-sample" disabled>Play sample</button>
-        <button id="btn-fast" disabled title="Process the whole sample as fast as possible, without playback">Run sample fast</button>
         <span class="sep"></span>
         <label class="file">Upload audio<input id="file" type="file" accept="audio/*" disabled></label>
         <span class="grow"></span>
@@ -35,7 +34,6 @@
       <div class="row">
         <label class="check"><input id="anc" type="checkbox" checked> NLMS noise canceller</label>
         <label class="check"><input id="hum" type="checkbox"> Add 50 Hz hum</label>
-        <label class="slider">Hum level <input id="hum-level" type="range" min="0" max="100" value="30"></label>
         <span class="hint">Canceller and hum apply from the next start.</span>
       </div>
     </section>
@@ -43,7 +41,7 @@
     <section class="stats">
       <div><span class="k">Time</span><span class="v" id="s-time">0.0 s</span></div>
       <div><span class="k">Speakers</span><span class="v" id="s-spk">0</span></div>
-      <div><span class="k">Segments</span><span class="v" id="s-seg">0</span></div>
+      <div><span class="k">Turns</span><span class="v" id="s-seg">0</span></div>
       <div><span class="k">Processing lag</span><span class="v" id="s-lag">0.00 s</span></div>
       <div><span class="k">Compute per 50 ms</span><span class="v" id="s-proc">–</span></div>
     </section>
@@ -60,19 +58,14 @@
     </section>
 
     <section class="panel">
-      <h2>Segments</h2>
+      <h2>Speaker turns</h2>
       <table id="segments">
         <thead><tr><th>Speaker</th><th>Start</th><th>End</th><th>F0</th><th>Cut by</th><th>Delay</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
       <p id="empty" class="hint">No segments yet. Start the microphone or play a sample.</p>
     </section>
-
-    <footer>
-      FIR low-pass → down-sampling → NLMS canceller → MFCC, autocorrelation F0 and energy VAD → ΔBIC change detection → online clustering.
-      The Python code is the same package the command-line tool uses, running through Pyodide. Audio never leaves this device.
-    </footer>
   </main>
-  <script src="/web/app.js"></script>
+  <script src="/web/app.js?v=7"></script>
 </body>
 </html>

@@ -4,3 +4,8 @@ __pycache__/
 runs/
 data/*.wav
 data/ami/
+data/callhome/
+
+# report and its figures (not part of the code)
+docs/report.docx
+docs/figures/

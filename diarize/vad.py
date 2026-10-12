@@ -7,17 +7,18 @@ from .config import Config
 
 
 class EnergyVAD:
-    """Speech if frame energy exceeds the tracked noise floor by `margin` dB.
+    """A frame is speech if its energy is `margin` dB above the noise floor.
 
-    The noise floor follows the energy down quickly and up only slowly, so it
-    settles on the background level between words (minimum-statistics idea).
-    A few consecutive loud frames are needed before speech starts (onset).
+    The noise floor follows the energy down quickly and up slowly. A median filter
+    then removes one-frame clicks and dropouts from the decision.
+    
     """
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.noise_db: float | None = None
         self.run = 0
+        self.hist = np.zeros(max(cfg.vad_median - 1, 0), dtype=bool)
 
     def process(self, energy_db: np.ndarray) -> np.ndarray:
         cfg = self.cfg
@@ -31,5 +32,9 @@ class EnergyVAD:
                 self.noise_db += cfg.noise_rise_rate * (e - self.noise_db)
             loud = e > max(self.noise_db + cfg.vad_margin_db, cfg.vad_abs_floor_db)
             self.run = self.run + 1 if loud else 0
-            out[i] = self.run >= cfg.vad_onset_frames
+            out[i] = loud if cfg.vad_median > 1 else self.run >= cfg.vad_onset_frames
+        if cfg.vad_median > 1 and len(out):
+            buf = np.concatenate([self.hist, out])
+            self.hist = buf[len(buf) - (cfg.vad_median - 1):]
+            out = np.median(np.lib.stride_tricks.sliding_window_view(buf, cfg.vad_median), axis=1) > 0.5
         return out

@@ -10,3 +10,5 @@ main.py
 requirements.txt
 README.md
 __pycache__
+pipeline.ipynb
+web/serve.py

@@ -9,15 +9,17 @@ const SPEC_PPS = 20;         // spectrogram columns per second
 const SPEC_BINS = 170;       // 0-8 kHz at 48 kHz / 1024-point FFT
 const SPEC_MAX_S = 1500;
 const HUM_HARMONICS = 12;
+const HUM_AMPLITUDE = 0.01;   // fixed, low level of the optional 50 Hz hum (fundamental; harmonic k is 1/k of it)
+const MERGE_GAP_S = 1.0;      // same speaker again within this pause -> same row in the table
 
-const worker = new Worker("/web/worker.js");
+const worker = new Worker("/web/worker.js?v=6");
 const S = {
   ready: false, running: false, mode: null,
-  sent: 0, total: 0, processed: 0, procMs: null, nSpk: 0, rtf: null,
-  energy: [], noise: [], vad: [], f0: [], segments: [], ref: null, refColor: {},
+  sent: 0, total: 0, processed: 0, procMs: null, nSpk: 0,
+  energy: [], noise: [], vad: [], f0: [], segments: [], rows: [], ref: null, refColor: {},
 };
 let ctx = null, bus = null, capture = null, analyser = null, source = null, micStream = null;
-let humNodes = [], specTimer = null, player = null;
+let humNodes = [], specTimer = null, player = null, playingBtn = null;
 const spec = document.createElement("canvas");
 spec.width = SPEC_PPS * SPEC_MAX_S;
 spec.height = SPEC_BINS;
@@ -40,9 +42,7 @@ function onResult(m) {
   m.segments.forEach((seg, i) => { seg.audio = m.audio[i]; S.segments.push(seg); addRow(seg); });
   if (m.segments.length && S.ref) mapReference();
   if (m.final) {
-    if (m.rtf != null) S.rtf = m.rtf;
-    if (S.mode === "fast") finish();
-    setStatus(S.rtf != null ? `Done, ${(1 / S.rtf).toFixed(1)}× faster than real time` : "Done", "ok");
+    setStatus("Done", "ok");
   }
   updateStats();
 }
@@ -59,8 +59,10 @@ async function audioContext() {
 }
 
 function reset(mode) {
-  Object.assign(S, { running: true, mode, sent: 0, total: 0, processed: 0, procMs: null, nSpk: 0, rtf: null,
-    energy: [], noise: [], vad: [], f0: [], segments: [], refColor: {} });
+  Object.assign(S, { running: true, mode, sent: 0, total: 0, processed: 0, procMs: null, nSpk: 0,
+    energy: [], noise: [], vad: [], f0: [], segments: [], rows: [], refColor: {} });
+  if (player) { player.onended = null; try { player.stop(); } catch (_) { /* already ended */ } }
+  player = playingBtn = null;
   $("segments").tBodies[0].replaceChildren();
   $("empty").hidden = false;
   specCtx.clearRect(0, 0, spec.width, spec.height);
@@ -82,7 +84,7 @@ function startGraph(toSpeakers) {
   bus.connect(capture);
   bus.connect(analyser);
   if ($("hum").checked) {
-    const amp = humAmplitude();
+    const amp = HUM_AMPLITUDE;
     for (let k = 1; k <= HUM_HARMONICS; k++) {
       const osc = ctx.createOscillator(), g = ctx.createGain();
       osc.frequency.value = 50 * k;
@@ -105,8 +107,6 @@ function startGraph(toSpeakers) {
     if (x < spec.width) { specCtx.putImageData(col, x, 0); specUsed = true; }
   }, 1000 / SPEC_PPS);
 }
-
-const humAmplitude = () => (Number($("hum-level").value) / 100) * 0.1;
 
 async function startMic() {
   try {
@@ -157,32 +157,6 @@ async function playSample() {
   } catch (e) { setStatus(String(e.message || e), "err"); }
 }
 
-async function runFast() {
-  try {
-    await audioContext();
-    setStatus("Loading sample…");
-    const { buffer, ref } = await loadSample();
-    const x = new Float32Array(buffer.length);
-    for (let c = 0; c < buffer.numberOfChannels; c++) {
-      const d = buffer.getChannelData(c);
-      for (let i = 0; i < x.length; i++) x[i] += d[i] / buffer.numberOfChannels;
-    }
-    if ($("hum").checked) {
-      const amp = humAmplitude();
-      for (let k = 1; k <= HUM_HARMONICS; k++) {
-        const w = (2 * Math.PI * 50 * k) / buffer.sampleRate;
-        for (let i = 0; i < x.length; i++) x[i] += (amp / k) * Math.sin(w * i);
-      }
-    }
-    reset("fast");
-    S.ref = ref;
-    S.total = buffer.duration;
-    S.sent = x.length;
-    setStatus("Processing…", "live");
-    worker.postMessage({ type: "batch", samples: x, sampleRate: buffer.sampleRate, anc: $("anc").checked }, [x.buffer]);
-  } catch (e) { setStatus(String(e.message || e), "err"); }
-}
-
 async function playUpload(file) {
   try {
     await audioContext();
@@ -193,9 +167,7 @@ async function playUpload(file) {
 
 function stop(flush = true) {
   if (!S.running) return;
-  const wasFast = S.mode === "fast";
   finish();
-  if (wasFast) return;                     // the batch job cannot be interrupted; its results keep arriving
   S.total = S.sent / SR;
   clearInterval(specTimer);
   if (source) { source.onended = null; try { source.stop(); } catch (_) { /* a microphone source has no stop() */ } source.disconnect(); }
@@ -210,15 +182,24 @@ function stop(flush = true) {
 
 function finish() { S.running = false; syncButtons(); }
 
-function playSegment(seg) {
-  if (!seg.audio || !seg.audio.length || !ctx) return;
-  if (player) { try { player.stop(); } catch (_) { /* already ended */ } }
-  const buf = ctx.createBuffer(1, seg.audio.length, 16000);
-  buf.copyToChannel(seg.audio, 0);
-  player = ctx.createBufferSource();
-  player.buffer = buf;
-  player.connect(ctx.destination);
-  player.start();
+async function playSegment(seg, btn) {
+  const wasThis = playingBtn === btn;
+  if (player) { player.onended = null; try { player.stop(); } catch (_) { /* already ended */ } player = null; }
+  if (playingBtn) { playingBtn.textContent = "Play"; playingBtn = null; }
+  if (wasThis) return;                              // second click on the same row = stop
+  if (!seg.audio || !seg.audio.length) { btn.textContent = "No audio"; btn.disabled = true; return; }
+  try {
+    await audioContext();                           // creates the context, or resumes it if the browser suspended it
+    const buf = ctx.createBuffer(1, seg.audio.length, 16000);
+    buf.copyToChannel(seg.audio, 0);
+    player = ctx.createBufferSource();
+    player.buffer = buf;
+    player.connect(ctx.destination);
+    player.onended = () => { if (playingBtn === btn) { btn.textContent = "Play"; playingBtn = null; player = null; } };
+    player.start();
+    playingBtn = btn;
+    btn.textContent = "Stop";
+  } catch (e) { setStatus(`Could not play the segment: ${e.message || e}`, "err"); }
 }
 
 // ---------------------------------------------------------------- UI
@@ -226,41 +207,61 @@ function setStatus(text, cls = "") { const el = $("status"); el.textContent = te
 
 function syncButtons() {
   const idle = S.ready && !S.running;
-  for (const id of ["btn-mic", "btn-sample", "btn-fast", "file", "sample", "anc", "hum"]) $(id).disabled = !idle;
-  $("btn-stop").disabled = !S.running || S.mode === "fast";
+  for (const id of ["btn-mic", "btn-sample", "file", "sample", "anc", "hum"]) $(id).disabled = !idle;
+  $("btn-stop").disabled = !S.running;
 }
 
 const spkColor = (i) => (i >= 0 ? css(`--spk${(i % 4) + 1}`) : css("--unknown"));
 
+// One table row per speaker turn: consecutive segments of the same speaker are joined into the row above.
 function addRow(seg) {
   $("empty").hidden = true;
-  const tr = document.createElement("tr");
+  const last = S.rows[S.rows.length - 1];
+  if (last && last.speaker === seg.speaker && seg.start - last.end <= MERGE_GAP_S) {
+    const gap = new Float32Array(Math.round(Math.max(0, seg.start - last.end) * 16000));
+    const audio = new Float32Array(last.audio.length + gap.length + seg.audio.length);
+    audio.set(last.audio);
+    audio.set(seg.audio, last.audio.length + gap.length);
+    const d0 = last.end - last.start, d1 = seg.end - seg.start;
+    last.f0_hz = last.f0_hz && seg.f0_hz ? (last.f0_hz * d0 + seg.f0_hz * d1) / (d0 + d1) : last.f0_hz || seg.f0_hz;
+    Object.assign(last, { audio, end: seg.end, reason: seg.reason, latency_s: seg.latency_s });
+    fillRow(last);
+    return;
+  }
+  const row = { speaker: seg.speaker, label: seg.label, start: seg.start, end: seg.end, f0_hz: seg.f0_hz,
+    reason: seg.reason, latency_s: seg.latency_s, audio: seg.audio, tr: document.createElement("tr") };
   const chip = document.createElement("span");
   chip.className = "chip";
-  chip.textContent = seg.label;
-  chip.style.background = spkColor(seg.speaker);
-  const cells = [chip, `${seg.start.toFixed(2)} s`, `${seg.end.toFixed(2)} s`, seg.f0_hz ? `${Math.round(seg.f0_hz)} Hz` : "–",
-    seg.reason, `${seg.latency_s.toFixed(2)} s`];
-  for (const c of cells) { const td = document.createElement("td"); td.append(c); tr.append(td); }
+  chip.textContent = row.label;
+  chip.style.background = spkColor(row.speaker);
+  row.cells = [chip, "", "", "", "", ""].map((c) => { const td = document.createElement("td"); td.append(c); row.tr.append(td); return td; });
   const btn = document.createElement("button");
   btn.textContent = "Play";
-  btn.onclick = () => playSegment(seg);
+  btn.onclick = () => playSegment(row, btn);
   const td = document.createElement("td");
   td.append(btn);
-  tr.append(td);
-  $("segments").tBodies[0].prepend(tr);
+  row.tr.append(td);
+  fillRow(row);
+  S.rows.push(row);
+  $("segments").tBodies[0].prepend(row.tr);
+}
+
+function fillRow(row) {
+  const text = [`${row.start.toFixed(2)} s`, `${row.end.toFixed(2)} s`, row.f0_hz ? `${Math.round(row.f0_hz)} Hz` : "–",
+    row.reason, `${row.latency_s.toFixed(2)} s`];
+  text.forEach((t, i) => { row.cells[i + 1].textContent = t; });
 }
 
 function updateStats() {
   const now = currentTime();
   $("s-time").textContent = `${now.toFixed(1)} s`;
   $("s-spk").textContent = S.nSpk;
-  $("s-seg").textContent = S.segments.length;
-  $("s-lag").textContent = S.mode === "fast" ? "–" : `${Math.max(0, S.sent / SR - S.processed).toFixed(2)} s`;
+  $("s-seg").textContent = S.rows.length;
+  $("s-lag").textContent = `${Math.max(0, S.sent / SR - S.processed).toFixed(2)} s`;
   $("s-proc").textContent = S.procMs == null ? "–" : `${S.procMs.toFixed(1)} ms`;
 }
 
-const currentTime = () => (S.mode === "fast" ? S.processed : S.sent / SR);
+const currentTime = () => S.sent / SR;
 
 // colour each reference speaker like the system speaker it overlaps most (display only)
 function mapReference() {
@@ -297,7 +298,7 @@ function prep(id) {
 
 function view() {
   const now = currentTime();
-  if (S.running && S.mode !== "fast") { const t1 = Math.max(now, VIEW_S); return [t1 - VIEW_S, t1]; }
+  if (S.running) { const t1 = Math.max(now, VIEW_S); return [t1 - VIEW_S, t1]; }
   return [0, Math.max(S.total, now, S.processed, 1)];
 }
 
@@ -368,7 +369,7 @@ function drawSpec(t0, t1) {
     g.drawImage(spec, t0 * SPEC_PPS, 0, Math.max(1, (t1 - t0) * SPEC_PPS), SPEC_BINS, 0, 0, w, ph);
   } else {
     g.fillStyle = css("--muted");
-    g.fillText(S.mode === "fast" ? "Not recorded in fast mode (there is no playback to analyse)." : "Appears while audio is running.", 8, 20);
+    g.fillText("Appears while audio is running.", 8, 20);
   }
   timeAxis(g, w, h, t0, t1);
 }
@@ -383,7 +384,6 @@ function frame() {
 // ---------------------------------------------------------------- wiring
 $("btn-mic").onclick = startMic;
 $("btn-sample").onclick = playSample;
-$("btn-fast").onclick = runFast;
 $("btn-stop").onclick = () => stop(true);
 $("file").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) playUpload(f); };
 requestAnimationFrame(frame);

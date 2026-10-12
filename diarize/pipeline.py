@@ -1,17 +1,10 @@
 """Real-time diarization: push audio chunks in, get finished speaker segments out.
 
-The "window" that cuts the audio is a small state machine running on 10 ms
-frames:
-
-  SILENCE --(VAD speech)--> SPEECH
-  SPEECH  --(pause >= min_silence)---------> cut, emit previous speaker, SILENCE
-  SPEECH  --(dBIC peak between the last two 1 s windows)--> cut at the peak,
-             emit previous speaker, keep going with the new one
-  SPEECH  --(segment longer than max_segment)--> cut
-
-Every emitted segment is labelled by the online clustering, cleaned for ASR
-and (optionally) written to disk immediately -- the previous speaker's audio
-is usable while the next one is still talking.
+While someone is speaking, a segment is cut when
+  - there is a pause of `min_silence_s`,
+  - the speaker changes (see `_id_check` and `_bic_check`), or
+  - the segment gets longer than `max_segment_s`.
+Each cut segment is given a speaker label, cleaned, and returned straight away.
 """
 from __future__ import annotations
 
@@ -25,7 +18,9 @@ from .cleaner import clean_segment
 from .cluster import OnlineSpeakerClustering, agglomerative_bic
 from .config import Config
 from .frontend import FrontEnd, Frames
-from .gauss import GaussStats, SpeakerStats, delta_bic
+from .ar import change_score
+from .sparse import change_score as dict_change_score
+from .gauss import SpeakerStats, stats_class
 from .vad import EnergyVAD
 
 
@@ -66,6 +61,7 @@ class StreamingDiarizer:
         self.fe = FrontEnd(cfg, self.input_sr)
         self.vad = EnergyVAD(cfg)
         self.clu = OnlineSpeakerClustering(cfg)
+        self.Stats = stats_class(cfg)
         self.out_dir = out_dir
         if out_dir:
             os.makedirs(os.path.join(out_dir, "segments"), exist_ok=True)
@@ -80,13 +76,15 @@ class StreamingDiarizer:
         self.in_speech = False
         self.seg_start = 0            # absolute frame index of the open segment
         self.last_speech = -1
-        self._cut_start = False       # True if the open segment began at a speaker-change cut
+        self._cut_start = False       # True if the open segment started at a speaker change
         self._reset_buffers()
         self.noise = np.zeros(0, dtype=np.float32)
         self.samples_in = 0
         self.segments: list[Segment] = []
         self._bic_best: tuple[float, int] | None = None
         self._next_bic = 0
+        self._id_hist: list = []      # best-fitting known speaker at each check
+        self._id_cur = None           # speaker the open segment started with
         self._proc_time = 0.0
 
         self.keep_trace = keep_trace
@@ -95,8 +93,7 @@ class StreamingDiarizer:
 
     # ------------------------------------------------------------------ utils
     def _reset_buffers(self):
-        d = self.cfg.n_mfcc - 1
-        self.buf_mfcc = np.zeros((0, d))
+        self.buf_feat = np.zeros((0, self.cfg.feature_dims))
         self.buf_f0 = np.zeros(0)
         self.buf_vad = np.zeros(0, dtype=bool)
 
@@ -149,15 +146,16 @@ class StreamingDiarizer:
             if not self.in_speech:
                 if not sp:
                     continue
-                # speech onset (VAD needed a few frames, start a bit earlier)
+                # speech starts
                 self.in_speech = True
                 self.seg_start = i
                 self._cut_start = False
                 self.last_speech = i
                 self._reset_buffers()
-                self._bic_best, self._next_bic = None, i + 2 * self.bic_W
+                self._bic_best, self._next_bic = None, i + self.bic_W
+                self._id_hist, self._id_cur = [], None
 
-            self.buf_mfcc = np.vstack([self.buf_mfcc, fr.mfcc[j:j + 1]])
+            self.buf_feat = np.vstack([self.buf_feat, fr.feat[j:j + 1]])
             self.buf_f0 = np.append(self.buf_f0, fr.f0[j])
             self.buf_vad = np.append(self.buf_vad, sp)
             if sp:
@@ -174,7 +172,9 @@ class StreamingDiarizer:
                 continue
             if i >= self._next_bic:                               # speaker change?
                 self._next_bic = i + cfg.bic_step_frames
-                c = self._bic_check(i)
+                c = self._id_check(i) if cfg.id_median > 1 and cfg.speaker_model != "gauss" else None
+                if c is None:
+                    c = self._bic_check(i)
                 if c is not None:
                     out += self._close(self.seg_start, c, "change")
                     self._restart_at(c)
@@ -183,14 +183,49 @@ class StreamingDiarizer:
     def _restart_at(self, frame: int):
         """Drop buffered frames before `frame`; the open segment now starts there."""
         k = frame - self.seg_start
-        self.buf_mfcc, self.buf_f0, self.buf_vad = self.buf_mfcc[k:], self.buf_f0[k:], self.buf_vad[k:]
+        self.buf_feat, self.buf_f0, self.buf_vad = self.buf_feat[k:], self.buf_f0[k:], self.buf_vad[k:]
         self.seg_start = frame
         self._cut_start = True
         self._bic_best = None
-        self._next_bic = frame + 2 * self.bic_W
+        self._next_bic = frame + self.bic_W
+        self._id_hist, self._id_cur = [], None
+
+    def _id_check(self, i: int) -> int | None:
+        """Speaker change between two speakers that are already known.
+
+        Every check, find which known speaker fits the last 1 s best. A median
+        (majority) filter smooths that answer. If it differs from the speaker the
+        segment started with, cut where it flipped.
+        
+        """
+        W, cfg, K = self.bic_W, self.cfg, self.cfg.id_median
+        end = i + 1 - self.seg_start
+        if end < W or len(self.clu.speakers) < 2:
+            return None
+        R = slice(end - W, end)
+        m = self.buf_vad[R]
+        winner = None
+        if m.sum() >= cfg.bic_min_speech:
+            st = self.Stats.from_frames(self.buf_feat[R][m], self.buf_f0[R][m])
+            d = {k: st.distance(s, cfg) for k, s in self.clu.speakers.items()}
+            winner = min(d, key=d.get)
+        self._id_hist.append(winner)
+        votes = [w for w in self._id_hist[-K:] if w is not None]
+        if len(self._id_hist) < K or not votes:
+            return None
+        top = max(set(votes), key=votes.count)
+        if votes.count(top) * 2 <= K:
+            return None
+        if self._id_cur is None:
+            self._id_cur = top
+        elif top != self._id_cur:
+            cut = i + 1 - W // 2 - (K // 2) * cfg.bic_step_frames
+            if cut - self.seg_start >= cfg.bic_min_speech:
+                return cut
+        return None
 
     def _bic_check(self, i: int) -> int | None:
-        """dBIC between [s-W, s) and [s, i] with s = i+1-W. Returns a cut frame or None."""
+        """Speaker change found by comparing the last two 1 s windows. Returns the frame to cut at, or None."""
         W, cfg = self.bic_W, self.cfg
         end = i + 1 - self.seg_start          # buffer length
         s = end - W
@@ -201,11 +236,18 @@ class StreamingDiarizer:
         if mL.sum() < cfg.bic_min_speech or mR.sum() < cfg.bic_min_speech:
             d = -np.inf
         else:
-            a = SpeakerStats.from_frames(self.buf_mfcc[L][mL], self.buf_f0[L][mL])
-            b = SpeakerStats.from_frames(self.buf_mfcc[R][mR], self.buf_f0[R][mR])
-            d = delta_bic(a.mfcc, b.mfcc, cfg.bic_lambda)
-            if a.logf0.n >= 10 and b.logf0.n >= 10:
-                d += cfg.pitch_weight * delta_bic(a.logf0, b.logf0, cfg.bic_lambda)
+            a = self.Stats.from_frames(self.buf_feat[L][mL], self.buf_f0[L][mL])
+            b = self.Stats.from_frames(self.buf_feat[R][mR], self.buf_f0[R][mR])
+            if cfg.speaker_model == "dict":
+                p = cfg.ar_order
+                d = dict_change_score(self.buf_feat[L][mL][:, p:], self.buf_f0[L][mL], self.buf_feat[R][mR][:, p:],
+                                      self.buf_f0[R][mR], cfg.dict_change_atoms, cfg.dict_change_pitch) - cfg.dict_change_thr
+            elif cfg.speaker_model == "ar":
+                p = cfg.ar_order
+                d = change_score(self.buf_feat[L][mL][:, :p], self.buf_f0[L][mL],
+                                 self.buf_feat[R][mR][:, :p], self.buf_f0[R][mR], cfg.ar_change_pitch) - cfg.ar_change_thr
+            else:
+                d = a.distance(b, cfg, "change")
         split = self.seg_start + s
         if self.keep_trace:
             self.trace["bic_t"].append(self._t(split))
@@ -232,12 +274,12 @@ class StreamingDiarizer:
         end = self._t(f_end - 1) + cfg.hop_len / cfg.target_sr / 2
         if end - start < cfg.min_segment_s or n_speech < 10:
             return []
-        stats = SpeakerStats.from_frames(self.buf_mfcc[k0:k1][mask], self.buf_f0[k0:k1][mask])
+        stats = self.Stats.from_frames(self.buf_feat[k0:k1][mask], self.buf_f0[k0:k1][mask])
         spk, conf, _ = self.clu.assign(stats, n_speech / cfg.frame_rate)
 
         fs = cfg.target_sr
         pad = int(cfg.pad_s * fs)
-        # no padding across a speaker-change cut: it would leak the other voice
+        # no extra audio around a speaker-change cut: it would include the other voice
         pad_l = 0 if self._cut_start else pad
         pad_r = 0 if reason == "change" else pad
         raw = self.fe.ring.read(int(start * fs) - pad_l, int(end * fs) + pad_r)
@@ -249,7 +291,7 @@ class StreamingDiarizer:
         if self.out_dir:
             name = f"{seg.id:04d}_{seg.label}_{start:08.2f}-{end:08.2f}.wav"
             seg.file = os.path.join("segments", name)
-            import soundfile as sf  # only needed when writing files (not available in the browser build)
+            import soundfile as sf  # only needed when writing files (not available in the browser)
             sf.write(os.path.join(self.out_dir, seg.file), audio, fs, subtype="PCM_16")
         self.segments.append(seg)
         return [seg]

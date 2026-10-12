@@ -1,13 +1,7 @@
-"""Gaussian sufficient statistics and the Bayesian Information Criterion.
+"""Earlier speaker model: a Gaussian of MFCCs, compared with BIC.
 
-Both the speaker-change detector and the speaker clustering ask the same
-question: "are these two blocks of frames better modelled by ONE Gaussian or
-by TWO?".  With BIC:
-
-    dBIC = N/2 log|S| - N1/2 log|S1| - N2/2 log|S2| - lambda * P
-    P    = 1/2 (d + d(d+1)/2) log N          (extra parameters of the 2-model)
-
-dBIC > 0  -> two different speakers,   dBIC < 0 -> same speaker.
+dBIC asks whether two blocks of frames are better described by one Gaussian or by two.
+dBIC > 0: two different speakers.  dBIC < 0: the same speaker.
 """
 from __future__ import annotations
 
@@ -110,6 +104,13 @@ class SpeakerStats:
         s.mfcc, s.logf0 = self.mfcc.merged(o.mfcc), self.logf0.merged(o.logf0)
         return s
 
+    def copy(self) -> "SpeakerStats":
+        return self.merged(SpeakerStats(self.mfcc.d))
+
+    def distance(self, o: "SpeakerStats", cfg, kind: str = "cluster") -> float:
+        """< 0: same speaker, > 0: different.  kind = "cluster" or "change"."""
+        return speaker_distance(self, o, cfg.bic_lambda if kind == "change" else cfg.clu_lambda, cfg.pitch_weight)
+
     def decay_to(self, n: float):
         k = n / max(self.mfcc.n, 1.0)
         if k < 1:
@@ -131,3 +132,15 @@ def speaker_distance(a: SpeakerStats, b: SpeakerStats, lam: float = 1.0, pitch_w
     if a.logf0.n >= 10 and b.logf0.n >= 10:
         d += pitch_weight * delta_bic(a.logf0, b.logf0, lam)
     return d
+
+
+def stats_class(cfg):
+    """The speaker-model class selected by `cfg.speaker_model`."""
+    if cfg.speaker_model == "ar":
+        from .ar import ARStats
+        return ARStats
+    if cfg.speaker_model == "dict":
+        from .sparse import DictStats
+        DictStats.ORDER, DictStats.ATOMS, DictStats.SPARSITY = cfg.ar_order, cfg.dict_atoms, cfg.dict_sparsity
+        return DictStats
+    return SpeakerStats
