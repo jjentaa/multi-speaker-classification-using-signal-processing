@@ -176,10 +176,10 @@ pipeline.ipynb      step-by-step notebook of every block
 Useful tools:
 
 ```bash
-.venv/bin/python tools/make_conversation.py --speakers 3 --turns 20 --out data/conv3   # new synthetic conversation
-.venv/bin/python tools/tune.py data/conv2 data/conv3 data/conv4 --grid dict_change_thr=0.3,0.36,0.42
-.venv/bin/python tools/hum_test.py data/test2 data/test3 data/test4 --snr 20 10 0
-.venv/bin/python tools/experiments.py                                              # all results
+python tools/make_conversation.py --speakers 3 --turns 20 --out data/conv3   # new synthetic conversation
+python tools/tune.py data/conv2 data/conv3 data/conv4 --grid dict_change_thr=0.3,0.36,0.42
+python tools/hum_test.py data/test2 data/test3 data/test4 --snr 20 10 0
+python tools/experiments.py                                              # all results
 ```
 
 ## Limitations
@@ -194,7 +194,3 @@ Useful tools:
 - **No going back.** Labels already emitted are never changed (it is real-time). If two speakers are merged later,
   only new turns get the merged label.
 - **Quiet speakers** can be missed by the energy VAD.
-
-An earlier version used MFCCs with a Gaussian per speaker (ΔBIC), which is not course material. It is still in
-[gauss.py](diarize/gauss.py) and can be run with
-`--set speaker_model=gauss aa_window=hamming vad_median=0 clean_method=subtract`.
