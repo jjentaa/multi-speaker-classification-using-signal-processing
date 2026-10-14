@@ -77,8 +77,7 @@ than 20 s) or `flush` (recording stopped).
 
 ## How it works
 
-Audio arrives at 48 kHz in 50 ms blocks and goes through four stages. The colors in the diagram above show which
-chapter of the course each block comes from.
+Audio arrives at 48 kHz in 50 ms blocks and goes through four stages.
 
 | Stage | Block | What it does | Why | Code |
 |---|---|---|---|---|
