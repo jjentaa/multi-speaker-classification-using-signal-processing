@@ -1,10 +1,8 @@
 # Real-time Speaker Diarization using Signal Processing
 
-**Who spoke when, live from one microphone — with no neural network.** The system listens to a conversation of
+**Who spoke when, live from one microphone — using only signal processing.** The system listens to a conversation of
 1–4 people, cuts the audio into speaker turns as they happen, labels each turn (`SPK_1`, `SPK_2`, …) and writes every
-turn out as a cleaned `.wav` plus a JSON log, ready to hand to a speech recognizer. Everything is classic DSP in
-numpy / scipy: FIR / IIR filters, an NLMS adaptive filter, autocorrelation pitch, AR (linear-prediction) envelopes and
-sparse coding with a learned dictionary.
+turn out as a cleaned `.wav` plus a JSON log, ready to hand to a speech recognizer. 
 
 **Live demo:** <https://multi-speaker-classification-using.vercel.app> (the same Python package, running in the
 browser through Pyodide)
@@ -17,7 +15,6 @@ browser through Pyodide)
 | Speaker F1 | 80.7 % | 42.9 % | 27.5 % |
 | Max delay after a turn ends | 1.38 s | 1.54 s | 1.43 s |
 
-Processing runs about 4–8× faster than real time on a laptop, and every turn is emitted within the 1–2 s target.
 
 Course project for *01204496 Algorithmic-Oriented Digital Signal Processing*, Kasetsart University.
 
@@ -42,13 +39,13 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 `main.py devices` lists the input devices; pick one with `--device <index>`.
 
 ```bash
-.venv/bin/python main.py live --out runs/live
+python main.py live --out runs/live
 ```
 
 **From a file**, fed in 50 ms blocks like a real microphone (same code path), with evaluation and plots:
 
 ```bash
-.venv/bin/python main.py file data/test4.wav --ref data/test4.rttm --out runs/test4 --plot
+python main.py file data/test4.wav --ref data/test4.rttm --out runs/test4 --plot
 ```
 
 **Web demo locally** (microphone, sample conversations or an uploaded file), then open `http://localhost:8765/web/`:
