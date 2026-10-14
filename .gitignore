@@ -1,11 +1,17 @@
 .venv/
 __pycache__/
 .pytest_cache/
+.DS_Store
 runs/
 data/*.wav
 data/ami/
 data/callhome/
 
-# report and its figures (not part of the code)
-docs/report.docx
+# report documents and course slides (not part of the code)
+*.docx
+docs/lecture_refs/
+
+# report figures and the scripts that draw them
 docs/figures/
+tools/plot_pipeline.py
+tools/plot_results.py

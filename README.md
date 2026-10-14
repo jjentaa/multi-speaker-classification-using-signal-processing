@@ -1,81 +1,73 @@
-# Real-time Multi-speaker Diarization
+# Real-time Speaker Diarization using Signal Processing
 
-Real-time speaker separation and identification (1–4 speakers, no overlapping speech) from a computer microphone,
-using pure signal processing (numpy / scipy) with no neural network at all: FIR / IIR filters, an NLMS adaptive filter,
-autocorrelation pitch and linear-prediction (AR) speaker models. Every time the speaker changes, the system
-cuts the previous speaker's audio out as a cleaned `.wav` file (ready to hand to an ASR) and logs the timestamp + label to JSON.
+**Who spoke when, live from one microphone — with no neural network.** The system listens to a conversation of
+1–4 people, cuts the audio into speaker turns as they happen, labels each turn (`SPK_1`, `SPK_2`, …) and writes every
+turn out as a cleaned `.wav` plus a JSON log, ready to hand to a speech recognizer. Everything is classic DSP in
+numpy / scipy: FIR / IIR filters, an NLMS adaptive filter, autocorrelation pitch, AR (linear-prediction) envelopes and
+sparse coding with a learned dictionary.
 
-## Installation
+**Live demo:** <https://multi-speaker-classification-using.vercel.app> (the same Python package, running in the
+browser through Pyodide)
+
+![Pipeline](docs/pipeline.png)
+
+| | Synthetic test set | CALLHOME (phone calls) | AMI (meetings) |
+|---|---|---|---|
+| **DER** (lower is better) | **16.9 %** | 34.9 % | 68.3 % |
+| Speaker F1 | 80.7 % | 42.9 % | 27.5 % |
+| Max delay after a turn ends | 1.38 s | 1.54 s | 1.43 s |
+
+Processing runs about 4–8× faster than real time on a laptop, and every turn is emitted within the 1–2 s target.
+
+Course project for *01204496 Algorithmic-Oriented Digital Signal Processing*, Kasetsart University.
+
+---
+
+## Contents
+
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Data and evaluation](#data-and-evaluation)
+- [Experiments](#experiments)
+- [Repository layout](#repository-layout)
+- [Limitations](#limitations)
+
+## Quick start
 
 ```bash
-uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
-(or `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`)
-
-## Usage
-
-**Real-time from the microphone**  (press Ctrl+C to stop)
+**Live from the microphone** (Ctrl+C to stop). On macOS, allow Terminal to use the microphone the first time.
+`main.py devices` lists the input devices; pick one with `--device <index>`.
 
 ```bash
 .venv/bin/python main.py live --out runs/live
 ```
 
-On macOS the first run requires granting Terminal microphone access (System Settings → Privacy & Security → Microphone).
-List the available devices with `main.py devices` and pick one with `--device <index>`.
-
-**From an audio file** (fed in 50 ms at a time like a real microphone, using the same code path), with evaluation and plots
+**From a file**, fed in 50 ms blocks like a real microphone (same code path), with evaluation and plots:
 
 ```bash
-.venv/bin/python main.py file data/test4.wav --ref data/test4.rttm --out runs/test4 --plot --refine
+.venv/bin/python main.py file data/test4.wav --ref data/test4.rttm --out runs/test4 --plot
 ```
 
-**Evaluate an existing result** (e.g. from a live recording whose reference was made afterwards)
-
-```bash
-.venv/bin/python main.py eval --ref my_reference.rttm --hyp runs/live/result.json
-```
-
-**Generate a test conversation with known ground truth** (macOS TTS voices as speakers, with noise + reverb)
-
-```bash
-.venv/bin/python tools/make_conversation.py --speakers 3 --turns 20 --out data/conv3
-```
-
-**Tune parameters** (grid search for the lowest DER), **hum robustness test** and **unit tests**
-
-```bash
-.venv/bin/python tools/tune.py data/conv2 data/conv3 data/conv4 --grid ar_change_thr=0.9,1.1,1.3 ar_clu_thr=0.18,0.22,0.26
-```
-
-```bash
-.venv/bin/python tools/hum_test.py data/test2 data/test3 data/test4 --snr 20 10 0
-```
-
-```bash
-.venv/bin/python -m pytest tests
-```
-
-All parameters live in [diarize/config.py](diarize/config.py) and can be overridden from the command line, e.g.
-`--set min_silence_s=0.4 ar_change_thr=1.2`
-
-**Web demo** (the same Python package running in the browser through Pyodide; microphone, sample conversations or an uploaded file)
+**Web demo locally** (microphone, sample conversations or an uploaded file), then open `http://localhost:8765/web/`:
 
 ```bash
 python3 web/serve.py
 ```
 
-then open `http://localhost:8765/web/`. The site is static, so it can be deployed as is (e.g. `vercel` from the
-repository root; `vercel.json` maps `/` to `web/index.html`).
+All parameters live in [diarize/config.py](diarize/config.py) and can be overridden with
+`--set name=value`, e.g. `--set min_silence_s=0.4 dict_change_thr=0.4`.
 
 ### Output
 
 ```
 runs/<name>/
-  result.json          # timestamp + label of every segment (item 2.2)
-  result.rttm          # standard format for pyannote.metrics
-  segments/0003_SPK_2_00012.40-00015.93.wav   # 1 file = 1 speaker, 16 kHz, cleaned
-  eval.json, session.png, session_timeline.png   # when --ref / --plot is given
+  result.json                                  # one entry per speaker turn
+  result.rttm                                  # standard format, for pyannote.metrics
+  segments/0003_SPK_2_00012.40-00015.93.wav    # one file per turn, 16 kHz, cleaned
+  eval.json, session.png, session_timeline.png # with --ref / --plot
 ```
 
 ```json
@@ -84,179 +76,191 @@ runs/<name>/
  "file": "segments/0000_SPK_1_00000.82-00003.63.wav"}
 ```
 
-`reason` says why the segment was cut: `pause` (silence ≥ 0.3 s), `change` (the prediction error jumped mid-speech: speaker change),
-`max` (longer than 20 s), `flush` (recording stopped)
+`reason` is why the turn was cut: `pause` (silence ≥ 0.3 s), `change` (speaker change mid-speech), `max` (longer
+than 20 s) or `flush` (recording stopped).
 
-## Pipeline
+## How it works
 
-Every signal-processing block comes from the course slides (chapters 4, 5 and 6); the reference is given in the table.
+Audio arrives at 48 kHz in 50 ms blocks and goes through four stages. The colors in the diagram above show which
+chapter of the course each block comes from.
 
-```
-mic 48 kHz ─► Kaiser FIR low-pass ─► ↓3 ─► 16 kHz ─► NLMS canceller ─┬─► pre-emphasis ─► Hamming ─► autocorrelation ─► AR model ─► spectral envelope ─┐
-                                                                     ├─► Butterworth BP 60–900 ─► centre clipping ─► autocorrelation ─► F0 ───────────┤
-                                                                     └─► Butterworth HP 70 ─► energy VAD ─► median filter ─► real-time window ◄───────┤
-                                                                                                                 │ (pause, or change of speaker)      │
-                                                                                 clean (Wiener filter) ◄─ cut segment ─► dictionary per speaker ◄─────┘
-                                                                                         │                               (K-SVD; OMP, lowest residual wins)
-                                                                                         ▼
-                                                                                 segments/*.wav + result.json
-```
+| Stage | Block | What it does | Course | Code |
+|---|---|---|---|---|
+| **1 · Preprocessing** | FIR low-pass | Kaiser-window design: passband 6.8 kHz, stopband 8 kHz, δ = 0.001 → A = 60 dB, β = 5.65, 147 taps (linear phase); stops aliasing before down-sampling | CH04-03 | [dsp.py](diarize/dsp.py) `kaiser_lowpass` |
+| | Down-sample ↓3 | Keeps every 3rd sample → 16 kHz (phase carried across blocks) | CH03-01 | `Decimator` |
+| | NLMS canceller | Adaptive FIR, 1024 taps, that predicts and subtracts periodic noise (mains hum, fans) | CH05-02, CH05-03 | `AdaptiveNoiseCanceller` |
+| **2 · Feature extraction** | 2.1 Spectrum | Pre-emphasis `1 − 0.97 z⁻¹` → Hamming 32 ms / hop 10 ms → autocorrelation r[0..16] → normal equations R a = r → log envelope −log\|A(e^jω)\|² at 32 points: the shape of the vocal tract | CH04-03, CH05-01, CH05-02 | [sparse.py](diarize/sparse.py) `envelope`, [ar.py](diarize/ar.py) |
+| | 2.2 Pitch (F0) | Butterworth band-pass 60–900 Hz → center clipping (30 % of peak) → autocorrelation peak in lag 40…266 → F0 = fs / k* | CH04-02, CH04-03, CH02-03 | [dsp.py](diarize/dsp.py) `pitch_autocorr` |
+| | 2.3 VAD | Butterworth high-pass 70 Hz → frame energy vs. a self-adapting noise floor (+10 dB) → 5-frame median filter | CH04-02, CH04-03 | [vad.py](diarize/vad.py) |
+| **3 · Segmentation** | Real-time window | Cuts a turn at a pause ≥ 0.3 s, or mid-speech when the speaker changes (checked every 50 ms) | – | [pipeline.py](diarize/pipeline.py) |
+| **4 · Speaker ID & output** | Dictionary per speaker | 16 envelope atoms per speaker learned with K-SVD; a turn is coded with OMP and goes to the speaker whose dictionary leaves the smallest residual | CH06-01 | [sparse.py](diarize/sparse.py), [cluster.py](diarize/cluster.py) |
+| | Cleaner | Wiener gain S / (S + N) per frequency, noise from the latest silence | CH05-02 | [cleaner.py](diarize/cleaner.py) |
+| | Writer | One `.wav` per turn + JSON / RTTM | – | [io.py](diarize/io.py) |
 
-| Block | What it does | Course slides | Code |
-|---|---|---|---|
-| Sampling | Captures 48 kHz microphone audio in 50 ms blocks through a `sounddevice` callback | – | [main.py](main.py) `cmd_live` |
-| FIR low-pass | Kaiser-window design from a specification: passband 6.8 kHz, stopband 8 kHz, δ = 0.001 → A = 60 dB, β = 5.65, M = 146 (147 taps, type I linear phase) | CH04-03 Kaiser window method | [dsp.py](diarize/dsp.py) `kaiser_lowpass`, `Decimator` |
-| Down-sampling | Keeps every 3rd sample → 16 kHz (the phase is carried across blocks, so the result equals processing the whole file) | CH04-01 basic structures | `Decimator.process` |
-| NLMS canceller | Adaptive FIR (1024 taps, reference = the microphone delayed 30 ms) that removes mains hum / fan tones | CH05-02 adaptive filtering, CH05-03 LMS | `AdaptiveNoiseCanceller` |
-| Pre-emphasis | `y[n] = x[n] − 0.97 x[n−1]`, a 2-tap FIR with one zero | CH04-01 FIR vs. IIR | `PreEmphasis` |
-| Windowing | Hamming, 32 ms frames, 10 ms hop | CH04-03 commonly used windows | `hamming`, `frame_signal` |
-| AR model | Autocorrelation r[0..16] of each frame, then the normal equations R a = r give the linear-prediction coefficients; the frame is described by the log spectral envelope −log\|A(e^jω)\|² at 32 frequencies | CH05-01 AR model / linear prediction, CH05-02 normal equation | `autocorr_lags`, [ar.py](diarize/ar.py), [sparse.py](diarize/sparse.py) `envelope` |
-| Butterworth IIR | 4th order, cascade of second-order sections with continuous state: band-pass 60–900 Hz for pitch, high-pass 70 Hz for the output audio | CH04-02 Butterworth, bilinear transformation; CH04-01 cascade form | `Butterworth` |
-| Centre clipping + autocorrelation | A clipper removes the formant structure, the autocorrelation peak gives F0 | CH04-03 clippers | `center_clip`, `pitch_autocorr` |
-| Energy VAD | Frame energy against a self-adapting noise floor | – | [vad.py](diarize/vad.py) |
-| Median filter | Running median on two decision tracks: loud/quiet (5 frames) and "which known speaker fits the last second" (9 checks) | CH04-03 median filters | `MedianFilter`, [vad.py](diarize/vad.py), [pipeline.py](diarize/pipeline.py) `_id_check` |
-| Speaker identification | A dictionary of 16 envelope atoms per speaker, learned with K-SVD; a segment's frames are sparse-coded with OMP and go to the speaker whose dictionary leaves the smallest residual | CH06-01 sparse coding, OMP, K-SVD | [sparse.py](diarize/sparse.py), [cluster.py](diarize/cluster.py) |
-| Cleaner | Wiener gain S / (S + N) per frequency, noise N from the most recent silence | CH05-02 Wiener filter, signal denoising | [cleaner.py](diarize/cleaner.py) |
+Spectrum (2.1) and pitch (2.2) both describe *who* is speaking — the shape of the vocal tract and how fast the vocal
+folds vibrate — and feed the speaker model and the change detector together. VAD (2.3) only says *whether* anyone is
+speaking, for segmentation.
 
-### Speaker model: sparse coding with a learned dictionary ([sparse.py](diarize/sparse.py))
+<details>
+<summary><b>NLMS noise canceller</b></summary>
 
-Each frame is first turned into the log spectral envelope of its AR(16) model, sampled at 32 frequencies with the
-mean removed. A speaker is then a dictionary D of 16 envelope shapes ("atoms"), learned from that speaker's own
-frames with **K-SVD**: alternate (1) sparse coding of every frame with **OMP** and (2) updating one atom at a time,
-with its coefficients, as the best rank-1 fit (SVD) of the error left for the frames that use it. A frame x is
-coded as x ≈ Dᵀα with at most one non-zero coefficient, and the share of energy that cannot be represented,
-‖x − Dᵀα‖² / ‖x‖², says how well the frame fits that speaker. A segment is coded with every speaker's dictionary;
-the average residual share, plus 0.5 × the difference of mean log-F0, is the distance.
-
-One AR model per speaker ([ar.py](diarize/ar.py), `--set speaker_model=ar`) is a single average envelope; a
-dictionary keeps several (vowels, consonants). With the correct turn boundaries, 1 s pieces of speech are
-attributed to the right speaker 95.5 % of the time with the dictionary against 91.1 % with one AR model.
-
-### Building the real-time cutting window ([pipeline.py](diarize/pipeline.py))
-
-A state machine runs every 10 ms:
-
-1. **VAD** – frame energy against a self-adapting noise floor (falls fast, rises slowly); more than 10 dB above it
-   = loud, and a 5-frame median filter turns that into the speech decision
-2. **Cut at a pause** – silence ≥ 0.3 s → close the segment and emit it immediately (delay ≈ 0.35 s)
-3. **Cut mid-speech**, checked every 50 ms, because some speakers follow each other with no gap:
-   - *between known speakers*: the last 1 s is coded with every speaker's dictionary and the winner is noted; that
-     track flickers, so it is median filtered over 9 checks, and the segment is cut where the filtered winner
-     differs from the speaker the segment started with (delay ≈ 0.8 s)
-   - *to an unknown speaker*: a small dictionary (8 atoms) is learned on each of two adjacent 1 s windows; if each
-     codes the other window clearly worse than its own (plus the jump of mean log-F0) → cut at the peak (delay ≈ 1.3 s)
-4. A closed segment goes to **clustering** → gets a label → **cleaner** (Wiener filter using a noise print
-   from the most recent silence, trim head and tail, normalize to −20 dBFS, fade) → file + JSON written immediately
-
-### Adaptive noise canceller ([dsp.py](diarize/dsp.py) `AdaptiveNoiseCanceller`)
-
-Same structure as an acoustic echo canceller, but a single microphone has no separate reference signal, so the
-reference is the microphone itself delayed by D = 30 ms (an adaptive line enhancer):
+A single microphone has no separate noise reference, so the reference is the microphone itself delayed by
+D = 30 ms (an adaptive line enhancer). Periodic interference is still correlated after 30 ms and can be predicted;
+speech mostly is not.
 
 ```
-d(n) = v(n) + y(n)        microphone = speech + periodic interference (hum, fan)
+d(n) = v(n) + y(n)        microphone = speech + periodic interference
 x(n) = d(n − D)           reference
 ŷ(n) = ĥᵀ x(n)            adaptive FIR estimate of the interference
-e(n) = d(n) − ŷ(n)        output, goes on to the three feature branches
+e(n) = d(n) − ŷ(n)        output
 ĥ ← ĥ + μ e(n) x(n) / (‖x(n)‖² + L e(n)²)        NLMS, μ = 0.005, L = 1024
 ```
 
-A periodic interference can be predicted from 30 ms ago, so it is subtracted. Voiced speech and reverberation are
-also partly predictable over 30 ms, so the weights are only updated while the output level is within 6 dB of its
-noise floor (i.e. nobody is talking), the same reason an echo canceller freezes during double-talk. Set
-`--set anc_taps=0` to switch the stage off.
+Voiced speech is also partly predictable over 30 ms, so the weights are only updated while the output is within 6 dB
+of its noise floor (nobody talking), like an echo canceller freezing during double-talk. `--set anc_taps=0` switches
+it off.
+</details>
 
-### Clustering
+<details>
+<summary><b>Speaker model: sparse coding with a learned dictionary</b></summary>
 
-A new segment joins the speaker with the smallest distance if it is below 0.21; otherwise a new speaker is opened
-(at most 4), provided there is ≥ 1.5 s of speech. Two speaker models closer than 0.17 (each coded with the other's
-dictionary) are merged into one. A speaker keeps its most recent 2000 frames (20 s) and its dictionary is re-learned
-when new frames arrive.
+Each 10 ms frame becomes the 32-point log envelope of its AR(16) model, mean removed. A speaker is a dictionary D of
+16 envelope shapes ("atoms") learned from that speaker's own frames with **K-SVD**: alternate (1) sparse coding of
+every frame with **OMP** and (2) updating each atom as the best rank-1 fit (SVD) of the error of the frames that use
+it. A frame x is coded with one atom, and the share of its energy left over,
 
-### Earlier model (MFCC + Gaussian + ΔBIC)
+```
+residual = Σ‖x − D α‖² / Σ‖x‖²        (0 = perfectly explained, 1 = not at all)
+```
 
-The first version of this project used MFCC features, a Gaussian per speaker compared with ΔBIC, a Hamming-window
-FIR and spectral subtraction, none of which are in the course slides. That code is still in the package
-([gauss.py](diarize/gauss.py)) and can be run for comparison with
-`--set speaker_model=gauss aa_window=hamming vad_median=0 clean_method=subtract`.
+says how well the turn fits that speaker. The distance to a speaker is the residual plus
+0.5 × |difference of mean log-F0|. The closest speaker wins if the distance is below 0.21; otherwise a new speaker
+is opened (at most 4, and only with ≥ 1.5 s of speech). Two speakers closer than 0.17 are merged. Each speaker keeps
+its latest 2000 frames (20 s) and its dictionary is re-learned when frames arrive.
 
-## Experimental results (item 4)
+A dictionary keeps several shapes per person (vowels, consonants) where one AR model keeps a single average: with the
+true turn boundaries, 1 s pieces of speech go to the right speaker 95.5 % of the time against 91.1 %.
+</details>
 
-Conversations synthesized from macOS TTS voices (~100 s, 20–24 turns, 30% of speaker changes have a gap < 0.15 s,
-with noise + room reverb) — the `conv*` set was used for parameter tuning; the `test*` set uses different voices and was not used for tuning
-(DER uses a 0.25 s collar, F1 = per-speaker macro F1 after optimal mapping, 10 ms frames)
+<details>
+<summary><b>Real-time segmentation</b></summary>
 
-| File | Speakers | SNR / RT60 | DER | Speaker F1 | Speakers found | Mean / max delay | DER, one AR model | DER, earlier model |
-|---|---|---|---|---|---|---|---|---|
-| conv2 | 2 | 30 dB / 0.2 s | 0.7 % | 98.6 % | 2 | 0.78 / 1.36 s | 3.7 % | 1.8 % |
-| conv3 | 3 | 30 dB / 0.2 s | 5.7 % | 92.4 % | 4 | 0.76 / 1.36 s | 12.2 % | 3.8 % |
-| conv4 | 4 | 30 dB / 0.2 s | 16.2 % | 81.9 % | 4 | 0.72 / 1.35 s | 25.3 % | 3.6 % |
-| **test2** | 2 | 30 dB / 0.2 s | **18.6 %** | **85.7 %** | 4 | 0.77 / 1.35 s | 12.1 % | 5.8 % |
-| **test3** | 3 | 25 dB / 0.2 s | **4.5 %** | **95.7 %** | 4 | 0.70 / 1.36 s | 25.2 % | 5.8 % |
-| **test4** | 4 | 20 dB / 0.3 s | **27.6 %** | **60.8 %** | 4 | 0.84 / 1.39 s | 25.2 % | 4.6 % |
+A state machine runs every 10 ms:
 
-- Mean DER is 7.5 % on `conv*` and 16.9 % on `test*`; almost all of it is speaker confusion (missed speech ≤ 2.4 %,
-  false alarm ≤ 0.1 %). One AR model per speaker gave 13.7 % / 20.8 %, and the earlier MFCC + Gaussian model
-  (not course content) 3.1 % / 5.4 %.
-- The system still opens too many speakers (4 found on four of the six files) and is sensitive to its thresholds:
-  a small change can move the DER of one file by 10–20 points, so single-file numbers should not be read finely.
-- **Time delay** is at most 1.39 s on every file (target 1–2 s)
-- Processing runs ~8× faster than real time (real-time factor 0.13 on a MacBook); learning dictionaries costs about
-  twice the time of the single-AR-model version
-- Two things were tried and left out because they did not help: dropping a new speaker that nothing matches again
-  (CALLHOME DER 44.0 → 44.6 %), and a 5-frame median filter on the F0 track (`f0_median`, off)
+1. **Pause** — VAD silence ≥ 0.3 s closes the turn and emits it at once (delay ≈ 0.35 s).
+2. **Change between known speakers** — every 50 ms the last 1 s is coded with every speaker's dictionary; the winner
+   is median-filtered over 9 checks and the turn is cut where it changes (delay ≈ 0.8 s).
+3. **Change to an unknown speaker** — a small dictionary (8 atoms) is learned on each of two adjacent 1 s windows; if
+   each codes the other clearly worse than itself (plus the jump in mean log-F0), the score passes 0.36 and the turn is
+   cut at the peak (delay ≈ 1.3 s).
+4. A closed turn goes to speaker ID → cleaner (Wiener filter, trim, normalize to −20 dBFS, fade) → written to disk.
+</details>
 
-**Real telephone conversations** (CALLHOME English, first 10 conversations of the Hugging Face `talkbank/callhome`
-set, 76 min, 2–3 speakers, about 9 % of speech overlapped; nothing was tuned on it), mean DER:
+## Data and evaluation
 
-| Dictionary (current) | One AR model | Earlier model | Everything labelled as one speaker |
-|---|---|---|---|
-| 35.1 % | 42.7 % | 29.8 % | 33.1 % |
-
-The dictionary model is 7.6 points better than one AR model here, but still not better than calling everything one
-speaker: it beats that baseline on 2 of the 10 conversations, and on 3 it found only one speaker.
-
-The hum and AMI tables below were measured with the single-AR-model version and have not been re-run.
-
-**Mains hum** (50 Hz + harmonics to 600 Hz added to the same six files, `tools/hum_test.py`), mean DER:
-
-| Speech-to-hum ratio | Canceller off | Canceller on |
+| Set | What | Used for |
 |---|---|---|
-| no hum | 23.3 % | 17.3 % |
-| 20 dB | 22.1 % | 20.3 % |
-| 10 dB | 32.3 % | 18.7 % |
-| 0 dB | 98.4 % | 22.8 % |
+| Synthetic | Conversations made from macOS TTS voices, ~100 s each, 20–24 turns, white Gaussian noise + room reverb, 30 % of speaker changes without a pause ([make_conversation.py](tools/make_conversation.py)). `conv2–4` for tuning, `test2–4` (other voices) for testing | Main results |
+| Synthetic + hum | The six synthetic files plus 50 Hz mains hum with harmonics up to 600 Hz (amplitude 1/k) at several levels | NLMS canceller |
+| CALLHOME | English phone calls, 2–3 speakers, ~9 % overlapped speech; first 10 calls of Hugging Face `talkbank/callhome` (76 min) | Real data, not tuned on |
+| AMI | Meetings ES2004a, IS1009a, TS3003a, headset mix, 4 speakers, 5–16 % overlap (57 min) | Real data, not tuned on |
 
-With the canceller on, the DER stays near its no-hum level down to a 0 dB speech-to-hum ratio; without it the system
-fails completely at 0 dB. The differences in the first two rows are within the run-to-run sensitivity of the speaker
-model (a single file changes by 10–20 points when the input is perturbed slightly).
+Only the reference `.rttm` files of the synthetic set are in the repository; the audio is generated with
+`tools/make_conversation.py`, and CALLHOME / AMI must be downloaded separately into `data/callhome/` and `data/ami/`.
 
-The figure below was made with the earlier MFCC + Gaussian model.
+**DER** (diarization error rate) = (missed speech + false alarm + speaker confusion) / total speech, after mapping
+system labels to true speakers in the best way and ignoring ±0.25 s around each boundary. **Speaker F1** is averaged
+per speaker, so one talkative person cannot dominate it.
 
-![session](docs/session_test4.png)
+## Experiments
 
-**Real meetings** (AMI corpus, headset mix, 4 speakers, 14–25 min, 5–16 % of speech overlapped; default parameters):
+All numbers come from [tools/experiments.py](tools/experiments.py) (results in `runs/experiments.json`).
 
-| Meeting | DER | miss / false alarm / confusion | Speaker F1 | DER if everything is labelled as one speaker |
+### Whole pipeline
+
+| Dataset | DER | miss / false alarm / confusion | Speaker F1 | Max delay |
 |---|---|---|---|---|
-| ES2004a | 73.9 % | 26.3 / 8.3 / 39.4 | 22.2 % | 56.2 % |
-| IS1009a | 71.2 % | 18.4 / 7.8 / 45.0 | 34.9 % | 38.6 % |
-| TS3003a | 69.6 % | 40.3 / 1.1 / 28.3 | 19.4 % | 14.1 % |
+| Synthetic test (test2–4) | 16.9 % | 1.9 / 0.0 / 14.9 | 80.7 % | 1.38 s |
+| Synthetic tuning (conv2–4) | 7.5 % | 0.7 / 0.0 / 6.8 | 91.0 % | 1.36 s |
+| CALLHOME (10 calls) | 34.9 % | 9.6 / 1.9 / 23.5 | 42.9 % | 1.54 s |
+| AMI (3 meetings) | 68.3 % | 28.3 / 5.7 / 34.3 | 27.5 % | 1.43 s |
 
-On real meetings the system is worse than labelling all speech as one speaker (the last column assumes perfect
-speech detection). Turns are short (median ≈ 1 s, below the 1.5 s needed to open a new speaker) and quiet speakers
-are missed by the energy VAD. The earlier MFCC + Gaussian model was also below that baseline (74 / 48 / 61 %).
+On real recordings people interrupt each other, overlap and do not leave pauses, which this system does not model.
+On both CALLHOME (33.1 %) and AMI (36.3 %), labelling all speech as a single speaker would score better.
 
-## Limitations / future work
+### F0 helps identify speakers
 
-- The numbers above come from TTS voices, where each "person" has a very stable voice. For real people in a room, record
-  real audio (`main.py live` keeps a `recording.wav`), make a reference RTTM, then use `tools/tune.py` to re-tune
-  `ar_change_thr`, `ar_change_pitch`, `ar_clu_thr`, `min_silence_s` — the change threshold has the largest effect
-- The AR speaker model is sensitive: small changes of a threshold or of the input can move the DER of one file by
-  10–20 points, and it finds an extra speaker on some files
-- Early in a meeting, a speaker who talks for less than 1.5 s is not yet split off as a new speaker (they are assigned to the nearest one)
-- Labels that have already been emitted cannot be changed (it is real-time); if two models are merged later, new labels are correct but old ones stay as they were
-- The adaptive canceller only removes steady periodic interference (hum, fan tones) and has only been tested on
-  synthetic hum; it does nothing for broadband noise, and after a sudden change in the interference it needs a
-  pause in the speech to re-converge
-- Per scope 1.3.2, the system does not support overlapping speech
+Removing F0 from the speaker model and the change detector raises the mean DER on the six synthetic files from
+**12.2 % to 21.4 %**. It helps most with 3–4 speakers (conv3 5.7 → 41.6 %, conv4 16.2 → 46.5 %) but is not better on
+every file (test2 18.6 % with F0 against 2.9 % without).
+
+### Speaker-change cuts
+
+| Tolerance | Recall (true changes found) | Precision ("change" cuts that are right) |
+|---|---|---|
+| ±0.25 s | 89 % | 26 % |
+| ±0.5 s | 97 % | 33 % |
+
+The detector cuts too often rather than too rarely. That is the cheaper mistake: an extra cut is usually given the
+same speaker again, while a missed change mixes two people in one turn.
+
+### NLMS canceller against mains hum
+
+Mean DER on the six synthetic files:
+
+| Hum level (below speech) | Canceller off | Canceller on |
+|---|---|---|
+| no hum | 8.8 % | 12.2 % |
+| 20 dB | 22.6 % | 15.4 % |
+| 10 dB | 32.2 % | 16.6 % |
+| 0 dB | 98.4 % | 14.9 % |
+
+With the canceller on, DER stays near its no-hum level even when the hum is as loud as the speech; without it the
+system fails at 0 dB. On clean audio the canceller costs a few points.
+
+## Repository layout
+
+```
+diarize/            the package
+  config.py         every parameter
+  pipeline.py       StreamingDiarizer: real-time window, segmentation
+  frontend.py       stages 1–2: preprocessing and the three feature branches
+  dsp.py            FIR / IIR / NLMS / windows / autocorrelation / pitch
+  ar.py, sparse.py  AR envelope, K-SVD + OMP speaker model, change score
+  vad.py            energy VAD
+  cluster.py        speaker assignment and merging
+  cleaner.py        Wiener filter
+  evaluate.py       DER, speaker F1
+main.py             command line: live / file / eval / devices
+tools/              data generation, tuning, experiments and figures
+web/                browser demo (Pyodide), deployed on Vercel
+tests/              unit tests (python -m pytest tests)
+docs/               pipeline diagram
+pipeline.ipynb      step-by-step notebook of every block
+```
+
+Useful tools:
+
+```bash
+.venv/bin/python tools/make_conversation.py --speakers 3 --turns 20 --out data/conv3   # new synthetic conversation
+.venv/bin/python tools/tune.py data/conv2 data/conv3 data/conv4 --grid dict_change_thr=0.3,0.36,0.42
+.venv/bin/python tools/hum_test.py data/test2 data/test3 data/test4 --snr 20 10 0
+.venv/bin/python tools/experiments.py                                              # all results
+```
+
+## Limitations
+
+- **Overlapping speech** is not modeled; it is the main reason for the poor AMI result.
+- **Thresholds are sensitive.** The change threshold matters most, and a small change can move one file's DER by
+  10–20 points. Values were tuned on synthetic TTS voices, which are far more stable than real people; for a real room,
+  record with `main.py live` (it keeps `recording.wav`), make a reference RTTM and re-tune with `tools/tune.py`.
+- **Extra speakers.** The system often opens one speaker too many (4 found on four of the six synthetic files).
+- **Short turns.** A new person needs ≥ 1.5 s of speech before a new speaker is opened; until then their speech goes
+  to the closest known speaker.
+- **No going back.** Labels already emitted are never changed (it is real-time). If two speakers are merged later,
+  only new turns get the merged label.
+- **Quiet speakers** can be missed by the energy VAD.
+
+An earlier version used MFCCs with a Gaussian per speaker (ΔBIC), which is not course material. It is still in
+[gauss.py](diarize/gauss.py) and can be run with
+`--set speaker_model=gauss aa_window=hamming vad_median=0 clean_method=subtract`.
